@@ -1,0 +1,75 @@
+const payload = ($json.data && typeof $json.data === 'object') ? $json.data : $json;
+const errorObj = ($json.error && typeof $json.error === 'object') ? $json.error : null;
+
+function cdata(value) {
+  return String(value ?? '').replace(/]]>/g, ']]]]><![CDATA[>');
+}
+
+let tallyStatus = 'EXCEPTION';
+let tallyLineError = null;
+let tallyCreated = 0;
+let tallyAltered = 0;
+let tallyErrors = 0;
+let tallyExceptions = 0;
+let runId = null;
+
+if (errorObj) {
+  tallyStatus = 'EXCEPTION';
+  tallyLineError = errorObj.message || errorObj.description || 'Backend tally process failed';
+} else {
+  const backendStatus = String(payload.status ?? payload.tallyStatus ?? '').toUpperCase();
+  runId = payload.runId ?? payload.tallyRunId ?? null;
+
+  if (backendStatus === 'SUCCESS') {
+    tallyStatus = 'SUCCESS';
+  } else if (backendStatus === 'REVIEW_REQUIRED') {
+    tallyStatus = 'REVIEW_REQUIRED';
+    const reviewReasons = Array.isArray(payload.reviewReasons) ? payload.reviewReasons : [];
+    tallyLineError = reviewReasons.length ? reviewReasons.join('; ') : 'Review required before Tally posting';
+  } else {
+    tallyStatus = 'EXCEPTION';
+  }
+
+  const summary = payload.summary && typeof payload.summary === 'object' ? payload.summary : {};
+  tallyCreated = Number(summary.created ?? payload.tallyCreated ?? 0) || 0;
+  tallyAltered = Number(summary.altered ?? payload.tallyAltered ?? 0) || 0;
+  tallyErrors = Number(summary.errors ?? payload.tallyErrors ?? 0) || 0;
+  tallyExceptions = Number(summary.exceptions ?? payload.tallyExceptions ?? 0) || 0;
+
+  if (!tallyLineError) {
+    tallyLineError = payload.errorMessage ?? payload.message ?? null;
+  }
+}
+
+const logObject = {
+  generatedAt: new Date().toISOString(),
+  source: 'backend-process-with-tally',
+  status: tallyStatus,
+  runId,
+  payload,
+  error: errorObj
+};
+
+const tallyLogXml = [
+  '<TALLYLOG>',
+  `  <BACKEND_STATUS>${tallyStatus}</BACKEND_STATUS>`,
+  `  <RUN_ID>${String(runId ?? '')}</RUN_ID>`,
+  `  <BACKEND_RESPONSE><![CDATA[${cdata(JSON.stringify(logObject, null, 2))}]]></BACKEND_RESPONSE>`,
+  '</TALLYLOG>'
+].join('\n');
+
+return [{
+  json: {
+    ...$json,
+    ...payload,
+    tallyStatus,
+    tallyLineError,
+    tallyCreated,
+    tallyAltered,
+    tallyErrors,
+    tallyExceptions,
+    tallyBackendRunId: runId,
+    tallyLogXml,
+    tallyResponseRaw: JSON.stringify(payload)
+  }
+}];

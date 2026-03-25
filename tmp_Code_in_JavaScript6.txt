@@ -1,0 +1,691 @@
+return items.map((item, idx) => {
+  const sourceJson = item.json ?? {};
+
+  function pickNodeJson(candidates) {
+    if (typeof $items !== 'function') return null;
+    for (const name of candidates) {
+      try {
+        const rows = $items(name, 0, typeof $runIndex === 'number' ? $runIndex : 0);
+        if (Array.isArray(rows) && rows[0] && rows[0].json) return rows[0].json;
+      } catch (_err) {}
+    }
+    return null;
+  }
+
+  const fallbackNode = pickNodeJson([
+    'Code in JavaScript4',
+    'Review node (HITL or Normal flow)',
+    'Code in JavaScript',
+    'Tenant Context Guard',
+    'tenant specific file path extractor',
+    'Code in JavaScript5',
+    'Select rows from a table',
+  ]) || {};
+
+  const approvedFromSource =
+    (sourceJson.body && typeof sourceJson.body.approvedData === 'object' && sourceJson.body.approvedData) ||
+    (typeof sourceJson.approvedData === 'object' && sourceJson.approvedData) ||
+    (typeof sourceJson.approved_data === 'object' && sourceJson.approved_data) ||
+    {};
+
+  const approvedFromFallback =
+    (fallbackNode.body && typeof fallbackNode.body.approvedData === 'object' && fallbackNode.body.approvedData) ||
+    (typeof fallbackNode.approvedData === 'object' && fallbackNode.approvedData) ||
+    (typeof fallbackNode.approved_data === 'object' && fallbackNode.approved_data) ||
+    {};
+
+  // Keep source item as top priority, but enrich with fallback approved payload when missing.
+  const merged = {
+    ...approvedFromFallback,
+    ...fallbackNode,
+    ...approvedFromSource,
+    ...sourceJson,
+  };
+
+  function cleanText(value) {
+    if (value === null || value === undefined) return '';
+    if (typeof value === 'string') return value.trim();
+    if (typeof value === 'number' || typeof value === 'boolean') return String(value).trim();
+    try {
+      const serialized = JSON.stringify(value);
+      if (serialized && serialized !== '{}' && serialized !== '[]') return serialized.trim();
+    } catch (_e) {}
+    const fallback = String(value).trim();
+    return fallback === '[object Object]' ? '' : fallback;
+  }
+
+  function toNumber(value) {
+    if (value === null || value === undefined || value === '') return null;
+    if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+    if (Array.isArray(value)) {
+      for (const entry of value) {
+        const n = toNumber(entry);
+        if (n !== null) return n;
+      }
+      return null;
+    }
+    if (typeof value === 'object') {
+      const candidate =
+        value.amount ??
+        value.value ??
+        value.total ??
+        value.taxable_amount ??
+        value.tax ??
+        value.raw ??
+        value.rate ??
+        value.quantity ??
+        null;
+      return candidate === null ? null : toNumber(candidate);
+    }
+    const cleaned = String(value)
+      .replace(/[\u20B9]/g, '')
+      .replace(/,/g, '')
+      .replace(/\s+/g, '')
+      .replace(/\/-$/g, '')
+      .trim();
+    if (!cleaned) return null;
+    const n = Number(cleaned);
+    return Number.isNaN(n) ? null : n;
+  }
+
+  function escXml(value) {
+    return String(value ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/\"/g, '&quot;')
+      .replace(/'/g, '&apos;');
+  }
+
+  function normalizeUom(value) {
+    const raw = cleanText(value).toUpperCase();
+    if (!raw) return 'PCS';
+    const map = {
+      NOS: 'PCS',
+      NO: 'PCS',
+      PIECE: 'PCS',
+      PIECES: 'PCS',
+      PCS: 'PCS',
+      KG: 'KGS',
+      KGS: 'KGS',
+      KILOGRAM: 'KGS',
+      KILOGRAMS: 'KGS',
+      GR: 'GRS',
+      G: 'GRS',
+      GRM: 'GRS',
+      GRMS: 'GRS',
+      GRAM: 'GRS',
+      GRAMS: 'GRS',
+      GRS: 'GRS',
+      ROLL: 'ROLL',
+      BOX: 'BOX',
+    };
+    return map[raw] ?? raw;
+  }
+
+  function normalizeDateToTally(value) {
+    const raw = cleanText(value);
+    if (!raw) return '';
+
+    if (/^\d{8}$/.test(raw)) {
+      if (raw.startsWith('19') || raw.startsWith('20')) return raw;
+      const dd = raw.slice(0, 2);
+      const mm = raw.slice(2, 4);
+      const yy = raw.slice(4, 8);
+      return yy + mm + dd;
+    }
+
+    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw.replace(/-/g, '');
+
+    const dmy = raw.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
+    if (dmy) {
+      const dd = dmy[1].padStart(2, '0');
+      const mm = dmy[2].padStart(2, '0');
+      const yy = dmy[3].length === 2 ? '20' + dmy[3] : dmy[3];
+      return yy + mm + dd;
+    }
+
+    const ymd = raw.match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})$/);
+    if (ymd) return ymd[1] + ymd[2].padStart(2, '0') + ymd[3].padStart(2, '0');
+
+    return '';
+  }
+
+  function normalizeLineItems(rows) {
+    if (!Array.isArray(rows)) return [];
+    const out = [];
+    let seq = 1;
+
+    for (const raw of rows) {
+      if (!raw || typeof raw !== 'object') continue;
+
+      const description = cleanText(raw.description ?? raw.item_description ?? raw.item ?? raw.product_name ?? raw.particulars ?? null);
+      const hsn = cleanText(raw.hsn ?? raw.hsn_sac ?? raw.hsn_code ?? raw.hsnCode ?? null) || null;
+      const quantity = toNumber(raw.quantity ?? raw.qty ?? raw.actual_qty ?? raw.billed_qty);
+      const rate = toNumber(raw.rate ?? raw.unit_rate ?? raw.unitPrice);
+      const taxableAmount = toNumber(raw.taxable_amount ?? raw.taxable ?? raw.taxable_value ?? raw.amount ?? raw.value);
+
+      // Keep row-level taxes only if explicitly present at row level.
+      const rowHasExplicitTax =
+        raw.cgst !== undefined || raw.cgst_amount !== undefined ||
+        raw.sgst !== undefined || raw.sgst_amount !== undefined ||
+        raw.igst !== undefined || raw.igst_amount !== undefined;
+
+      const cgst = rowHasExplicitTax ? toNumber(raw.cgst ?? raw.cgst_amount) : null;
+      const sgst = rowHasExplicitTax ? toNumber(raw.sgst ?? raw.sgst_amount) : null;
+      const igst = rowHasExplicitTax ? toNumber(raw.igst ?? raw.igst_amount) : null;
+
+      const lineNo = toNumber(raw.line_no ?? raw.lineNo ?? raw.sr_no ?? raw.sl_no) ?? seq;
+      const unit = normalizeUom(raw.uom ?? raw.unit ?? raw.per ?? null);
+
+      const hasSignal =
+        Boolean(description) ||
+        Boolean(hsn) ||
+        quantity !== null ||
+        rate !== null ||
+        taxableAmount !== null;
+
+      if (!hasSignal) continue;
+
+      out.push({
+        line_no: lineNo,
+        description: description || ('Line ' + seq),
+        hsn,
+        quantity,
+        uom: unit,
+        rate,
+        taxable_amount: taxableAmount,
+        cgst,
+        sgst,
+        igst,
+      });
+
+      seq += 1;
+    }
+
+    return out;
+  }
+
+  function normalizeHsnTaxSummary(rows) {
+    if (!Array.isArray(rows)) return [];
+    return rows
+      .filter((r) => r && typeof r === 'object')
+      .map((r) => ({
+        hsn: cleanText(r.hsn ?? r.hsn_sac ?? r.hsn_code ?? null) || null,
+        taxable_amount: toNumber(r.taxable_amount ?? r.taxable ?? r.amount),
+        cgst_rate: toNumber(r.cgst_rate ?? r.cgstRate),
+        cgst: toNumber(r.cgst ?? r.cgst_amount),
+        sgst_rate: toNumber(r.sgst_rate ?? r.sgstRate),
+        sgst: toNumber(r.sgst ?? r.sgst_amount),
+        igst_rate: toNumber(r.igst_rate ?? r.igstRate),
+        igst: toNumber(r.igst ?? r.igst_amount),
+      }))
+      .filter((r) => r.hsn || r.taxable_amount !== null || r.cgst !== null || r.sgst !== null || r.igst !== null);
+  }
+
+  function sumBy(arr, key) {
+    return Number((arr.reduce((s, r) => s + (toNumber(r?.[key]) ?? 0), 0)).toFixed(2));
+  }
+
+  function dedupeLedgers(names) {
+    const out = [];
+    const seen = new Set();
+    for (const n of names) {
+      const x = cleanText(n);
+      if (!x) continue;
+      const key = x.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(x);
+    }
+    return out;
+  }
+
+  function noOpXml() {
+    return [
+      '<ENVELOPE>',
+      '  <HEADER>',
+      '    <TALLYREQUEST>Import Data</TALLYREQUEST>',
+      '  </HEADER>',
+      '  <BODY>',
+      '    <IMPORTDATA>',
+      '      <REQUESTDESC>',
+      '        <REPORTNAME>Vouchers</REPORTNAME>',
+      '      </REQUESTDESC>',
+      '      <REQUESTDATA></REQUESTDATA>',
+      '    </IMPORTDATA>',
+      '  </BODY>',
+      '</ENVELOPE>',
+    ].join('\n');
+  }
+
+  const preferredLineItemsSource =
+    (Array.isArray(approvedFromSource.line_items) && approvedFromSource.line_items) ||
+    (Array.isArray(approvedFromSource.lineItems) && approvedFromSource.lineItems) ||
+    (Array.isArray(sourceJson.line_items) && sourceJson.line_items) ||
+    (Array.isArray(sourceJson.lineItems) && sourceJson.lineItems) ||
+    [];
+
+  let lineItems = normalizeLineItems(preferredLineItemsSource);
+
+  const usedTopLevelFallback = lineItems.length === 0;
+  if (usedTopLevelFallback) {
+    const fallbackLine = {
+      description: merged.description,
+      hsn: merged.hsn,
+      quantity: merged.quantity,
+      uom: merged.uom ?? merged.unit,
+      rate: merged.rate,
+      taxable_amount: merged.taxable_amount ?? merged.subtotal ?? merged.amount,
+      // no row tax inferred in fallback mode
+      cgst: null,
+      sgst: null,
+      igst: null,
+    };
+    lineItems = normalizeLineItems([fallbackLine]);
+  }
+
+  const hsnTaxSummary = normalizeHsnTaxSummary(
+    approvedFromSource.hsn_tax_summary ??
+      approvedFromSource.hsnTaxSummary ??
+      sourceJson.hsn_tax_summary ??
+      sourceJson.hsnTaxSummary ??
+      []
+  );
+
+  const hasRowLevelTax = lineItems.some((li) => li.cgst !== null || li.sgst !== null || li.igst !== null);
+
+  const invoiceDate = normalizeDateToTally(merged.invoice_date ?? merged.invoiceDate);
+  const invoiceNumber = cleanText(merged.invoice_number ?? merged.invoiceNumber) || ('AUTO-' + Date.now() + '-' + idx);
+  const vendorName = cleanText(merged.vendor_name ?? merged.vendorName) || 'Unknown Vendor';
+  const purchaseLedgerName = cleanText(merged.purchase_ledger_name ?? merged.purchaseLedgerName ?? merged.tally_purchase_ledger_name) || 'Purchase';
+
+  const headerTaxable = toNumber(merged.taxable_amount ?? merged.subtotal);
+  const headerCgst = toNumber(merged.cgst);
+  const headerSgst = toNumber(merged.sgst);
+  const headerIgst = toNumber(merged.igst);
+  const tds = toNumber(merged.tds) ?? 0;
+  const roundOff = toNumber(merged.round_off) ?? 0;
+  const headerTotal = toNumber(merged.total_amount);
+
+  const lineTaxableSum = sumBy(lineItems, 'taxable_amount');
+  const hsnTaxableTotal = sumBy(hsnTaxSummary, 'taxable_amount');
+  const hsnHasTax = hsnTaxSummary.some((row) => (toNumber(row.cgst) ?? 0) !== 0 || (toNumber(row.sgst) ?? 0) !== 0 || (toNumber(row.igst) ?? 0) !== 0);
+  const invoiceHasTax = headerCgst !== null || headerSgst !== null || headerIgst !== null;
+  const taxMode = hasRowLevelTax ? 'ROW_LEVEL' : (hsnHasTax ? 'HSN_LEVEL' : (invoiceHasTax ? 'INVOICE_LEVEL' : 'UNKNOWN'));
+
+  // Enforce non-fabrication: if not row-level, clear line-level tax explicitly.
+  if (taxMode !== 'ROW_LEVEL') {
+    lineItems = lineItems.map((li) => ({ ...li, cgst: null, sgst: null, igst: null }));
+  }
+
+  let cgstFromMode = 0;
+  let sgstFromMode = 0;
+  let igstFromMode = 0;
+
+  if (taxMode === 'ROW_LEVEL') {
+    cgstFromMode = sumBy(lineItems, 'cgst');
+    sgstFromMode = sumBy(lineItems, 'sgst');
+    igstFromMode = sumBy(lineItems, 'igst');
+  } else if (taxMode === 'HSN_LEVEL') {
+    cgstFromMode = sumBy(hsnTaxSummary, 'cgst');
+    sgstFromMode = sumBy(hsnTaxSummary, 'sgst');
+    igstFromMode = sumBy(hsnTaxSummary, 'igst');
+  } else if (taxMode === 'INVOICE_LEVEL') {
+    cgstFromMode = headerCgst ?? 0;
+    sgstFromMode = headerSgst ?? 0;
+    igstFromMode = headerIgst ?? 0;
+  }
+
+  // Prefer header totals when explicitly provided (posting totals),
+  // but keep mode-derived totals for validation checks.
+  const taxable = headerTaxable ?? lineTaxableSum;
+  const cgstTotal = headerCgst ?? cgstFromMode;
+  const sgstTotal = headerSgst ?? sgstFromMode;
+  const igstTotal = headerIgst ?? igstFromMode;
+
+  const computedGrand = Number((taxable + cgstTotal + sgstTotal + igstTotal + roundOff - tds).toFixed(2));
+  const grandTotal = headerTotal ?? computedGrand;
+
+  const tolerance = Number.isFinite(Number(merged.tally_amount_tolerance)) ? Math.max(0, Number(merged.tally_amount_tolerance)) : 1;
+  const validationErrors = [];
+
+  if (headerTaxable !== null && Math.abs(headerTaxable - lineTaxableSum) > tolerance) {
+    validationErrors.push('line_taxable_sum_mismatch');
+  }
+
+  if (taxMode === 'ROW_LEVEL' && headerCgst !== null && Math.abs(headerCgst - cgstFromMode) > tolerance) {
+    validationErrors.push('cgst_total_mismatch');
+  }
+  if (taxMode === 'ROW_LEVEL' && headerSgst !== null && Math.abs(headerSgst - sgstFromMode) > tolerance) {
+    validationErrors.push('sgst_total_mismatch');
+  }
+  if (taxMode === 'ROW_LEVEL' && headerIgst !== null && Math.abs(headerIgst - igstFromMode) > tolerance) {
+    validationErrors.push('igst_total_mismatch');
+  }
+
+  if (taxMode === 'HSN_LEVEL' && headerCgst !== null && Math.abs(headerCgst - cgstFromMode) > tolerance) {
+    validationErrors.push('cgst_vs_hsn_mismatch');
+  }
+  if (taxMode === 'HSN_LEVEL' && headerSgst !== null && Math.abs(headerSgst - sgstFromMode) > tolerance) {
+    validationErrors.push('sgst_vs_hsn_mismatch');
+  }
+  if (taxMode === 'HSN_LEVEL' && headerIgst !== null && Math.abs(headerIgst - igstFromMode) > tolerance) {
+    validationErrors.push('igst_vs_hsn_mismatch');
+  }
+
+  if (headerTotal !== null && Math.abs(headerTotal - computedGrand) > tolerance) {
+    validationErrors.push('grand_total_formula_mismatch');
+  }
+
+  const expectedTaxForLineConsistency =
+    taxMode === 'ROW_LEVEL'
+      ? (cgstFromMode + sgstFromMode + igstFromMode)
+      : taxMode === 'HSN_LEVEL'
+        ? (cgstFromMode + sgstFromMode + igstFromMode)
+        : (cgstTotal + sgstTotal + igstTotal);
+  const expectedLineConsistencyTotal = Number((lineTaxableSum + expectedTaxForLineConsistency + roundOff - tds).toFixed(2));
+  if (Math.abs(grandTotal - expectedLineConsistencyTotal) > tolerance) {
+    validationErrors.push('line_item_total_consistency_mismatch');
+  }
+
+  if (!invoiceDate) validationErrors.push('missing_invoice_date');
+  if (!invoiceNumber) validationErrors.push('missing_invoice_number');
+  if (!vendorName) validationErrors.push('missing_vendor_name');
+  if (!lineItems.length && taxable <= 0 && grandTotal <= 0) validationErrors.push('missing_line_items_or_amounts');
+
+  const gstLedgerConfig = merged.gstLedgers && typeof merged.gstLedgers === 'object' ? merged.gstLedgers : {};
+
+  function pickLedgerName(type, rateOrNull) {
+    const typeLc = String(type).toLowerCase();
+    const candidates = [];
+    if (rateOrNull !== null && rateOrNull !== undefined) {
+      const normalizedRate = String(Number(rateOrNull));
+      candidates.push(typeLc + '_' + normalizedRate.replace('.', '_'));
+      candidates.push(typeLc + '_' + normalizedRate);
+      candidates.push(typeLc + rateOrNull);
+    }
+    candidates.push(typeLc);
+    candidates.push('input_' + typeLc);
+
+    for (const k of candidates) {
+      const v = gstLedgerConfig[k];
+      if (typeof v === 'string' && v.trim()) return v.trim();
+    }
+
+    return 'Input ' + String(type).toUpperCase();
+  }
+
+  // Build tax ledger buckets according to tax mode.
+  const taxBuckets = [];
+  if (taxMode === 'ROW_LEVEL') {
+    const map = new Map();
+    for (const li of lineItems) {
+      const taxableBase = toNumber(li.taxable_amount) ?? 0;
+      const cgstAmt = toNumber(li.cgst) ?? 0;
+      const sgstAmt = toNumber(li.sgst) ?? 0;
+      const igstAmt = toNumber(li.igst) ?? 0;
+
+      const cgstRate = taxableBase > 0 && cgstAmt > 0 ? Number(((cgstAmt * 100) / taxableBase).toFixed(3)) : null;
+      const sgstRate = taxableBase > 0 && sgstAmt > 0 ? Number(((sgstAmt * 100) / taxableBase).toFixed(3)) : null;
+      const igstRate = taxableBase > 0 && igstAmt > 0 ? Number(((igstAmt * 100) / taxableBase).toFixed(3)) : null;
+
+      const upsert = (type, rate, amt) => {
+        const amount = Number((amt ?? 0).toFixed(2));
+        if (!amount) return;
+        const key = type + '|' + String(rate ?? 'NA');
+        if (!map.has(key)) map.set(key, { type, rate, amount: 0 });
+        map.get(key).amount += amount;
+      };
+
+      upsert('CGST', cgstRate, cgstAmt);
+      upsert('SGST', sgstRate, sgstAmt);
+      upsert('IGST', igstRate, igstAmt);
+    }
+    for (const bucket of map.values()) {
+      bucket.amount = Number(bucket.amount.toFixed(2));
+      taxBuckets.push(bucket);
+    }
+  } else if (taxMode === 'HSN_LEVEL') {
+    const map = new Map();
+    for (const h of hsnTaxSummary) {
+      const upsert = (type, rate, amt) => {
+        const amount = Number((toNumber(amt) ?? 0).toFixed(2));
+        if (!amount) return;
+        const safeRate = toNumber(rate);
+        const key = type + '|' + String(safeRate ?? 'NA');
+        if (!map.has(key)) map.set(key, { type, rate: safeRate, amount: 0 });
+        map.get(key).amount += amount;
+      };
+      upsert('CGST', h.cgst_rate, h.cgst);
+      upsert('SGST', h.sgst_rate, h.sgst);
+      upsert('IGST', h.igst_rate, h.igst);
+    }
+    for (const bucket of map.values()) {
+      bucket.amount = Number(bucket.amount.toFixed(2));
+      taxBuckets.push(bucket);
+    }
+  } else if (taxMode === 'INVOICE_LEVEL') {
+    if (cgstTotal) taxBuckets.push({ type: 'CGST', rate: null, amount: Number(cgstTotal.toFixed(2)) });
+    if (sgstTotal) taxBuckets.push({ type: 'SGST', rate: null, amount: Number(sgstTotal.toFixed(2)) });
+    if (igstTotal) taxBuckets.push({ type: 'IGST', rate: null, amount: Number(igstTotal.toFixed(2)) });
+  }
+
+  const taxLedgerEntries = [];
+  const taxLedgerNames = [];
+  for (const bucket of taxBuckets) {
+    const ledger = pickLedgerName(bucket.type, bucket.rate);
+    taxLedgerNames.push(ledger);
+    taxLedgerEntries.push([
+      '            <ALLLEDGERENTRIES.LIST>',
+      '              <LEDGERNAME>' + escXml(ledger) + '</LEDGERNAME>',
+      '              <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>',
+      '              <AMOUNT>' + Number(bucket.amount).toFixed(2) + '</AMOUNT>',
+      '            </ALLLEDGERENTRIES.LIST>',
+    ].join('\n'));
+  }
+
+  const roundOffLedgerName = cleanText(merged.roundOffLedgerName ?? merged.round_off_ledger_name ?? merged.tally_roundoff_ledger_name) || 'Round Off';
+  const tdsLedgerName = cleanText(merged.tdsLedgerName ?? merged.tally_tds_ledger_name) || 'TDS Receivable';
+
+  if (tds) {
+    taxLedgerEntries.push([
+      '            <ALLLEDGERENTRIES.LIST>',
+      '              <LEDGERNAME>' + escXml(tdsLedgerName) + '</LEDGERNAME>',
+      '              <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>',
+      '              <AMOUNT>-' + Number(tds).toFixed(2) + '</AMOUNT>',
+      '            </ALLLEDGERENTRIES.LIST>',
+    ].join('\n'));
+  }
+
+  if (roundOff) {
+    taxLedgerEntries.push([
+      '            <ALLLEDGERENTRIES.LIST>',
+      '              <LEDGERNAME>' + escXml(roundOffLedgerName) + '</LEDGERNAME>',
+      '              <ISDEEMEDPOSITIVE>' + (roundOff >= 0 ? 'No' : 'Yes') + '</ISDEEMEDPOSITIVE>',
+      '              <AMOUNT>' + Number(roundOff).toFixed(2) + '</AMOUNT>',
+      '            </ALLLEDGERENTRIES.LIST>',
+    ].join('\n'));
+  }
+
+  const serviceLikePattern = /(service|job\\s*work|jobwork|printing|stitching|embroidery|design|consult|charges|labou?r|processing|fabrication)/i;
+  const serviceSignalText = [cleanText(merged.description), ...lineItems.map((li) => cleanText(li.description))].filter(Boolean).join(' ');
+  const hasServiceSignal = serviceLikePattern.test(serviceSignalText);
+  const hasQtyRateForAllLines = lineItems.length > 0 && lineItems.every((li) => toNumber(li.quantity) !== null && toNumber(li.rate) !== null);
+  const postingMode = (!hasQtyRateForAllLines || hasServiceSignal) ? 'ACCOUNTING_INVOICE' : 'INVENTORY_ITEMWISE';
+
+  const inventoryEntriesXml = lineItems
+    .map((li, i) => {
+      const desc = cleanText(li.description) || ('Line ' + (i + 1));
+      const stockItemName = escXml(desc);
+
+      const qty = toNumber(li.quantity) ?? 1;
+      const uom = normalizeUom(li.uom);
+      const taxableAmount = toNumber(li.taxable_amount) ?? 0;
+      const rate = toNumber(li.rate) ?? (qty ? taxableAmount / qty : taxableAmount);
+
+      const qtyText = Number(qty.toFixed(3)) + ' ' + uom;
+      const rateText = Number((rate ?? 0).toFixed(2)) + '/' + uom;
+      const amountText = Number(taxableAmount.toFixed(2));
+
+      return [
+        '            <ALLINVENTORYENTRIES.LIST>',
+        '              <STOCKITEMNAME>' + stockItemName + '</STOCKITEMNAME>',
+        '              <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>',
+        '              <RATE>' + escXml(rateText) + '</RATE>',
+        '              <AMOUNT>' + amountText.toFixed(2) + '</AMOUNT>',
+        '              <ACTUALQTY>' + escXml(qtyText) + '</ACTUALQTY>',
+        '              <BILLEDQTY>' + escXml(qtyText) + '</BILLEDQTY>',
+        '              <ACCOUNTINGALLOCATIONS.LIST>',
+        '                <LEDGERNAME>' + escXml(purchaseLedgerName) + '</LEDGERNAME>',
+        '                <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>',
+        '                <AMOUNT>' + amountText.toFixed(2) + '</AMOUNT>',
+        '              </ACCOUNTINGALLOCATIONS.LIST>',
+        '            </ALLINVENTORYENTRIES.LIST>',
+      ].join('\n');
+    })
+    .join('');
+
+  const narration = [
+    vendorName,
+    lineItems.slice(0, 5).map((li) => {
+      const hsnText = li.hsn ? ' [HSN ' + li.hsn + ']' : '';
+      return li.line_no + '. ' + (li.description || 'Line Item') + hsnText;
+    }).join(' | '),
+    lineItems.length > 5 ? ('+' + (lineItems.length - 5) + ' more items') : '',
+  ].filter(Boolean).join(' ; ');
+
+  const purchaseLedgerEntryXml = postingMode === 'ACCOUNTING_INVOICE'
+    ? [
+        '            <ALLLEDGERENTRIES.LIST>',
+        '              <LEDGERNAME>' + escXml(purchaseLedgerName) + '</LEDGERNAME>',
+        '              <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>',
+        '              <AMOUNT>' + Number(taxable).toFixed(2) + '</AMOUNT>',
+        '            </ALLLEDGERENTRIES.LIST>',
+      ].join('\\n')
+    : '';
+
+  const voucherXml = [
+    '<ENVELOPE>',
+    '  <HEADER>',
+    '    <TALLYREQUEST>Import Data</TALLYREQUEST>',
+    '  </HEADER>',
+    '  <BODY>',
+    '    <IMPORTDATA>',
+    '      <REQUESTDESC>',
+    '        <REPORTNAME>Vouchers</REPORTNAME>',
+    '      </REQUESTDESC>',
+    '      <REQUESTDATA>',
+    '        <TALLYMESSAGE>',
+    '          <VOUCHER VCHTYPE="Purchase" ACTION="Create">',
+    '            <DATE>' + escXml(invoiceDate) + '</DATE>',
+    '            <VOUCHERNUMBER>' + escXml(invoiceNumber) + '</VOUCHERNUMBER>',
+    '            <REFERENCE>' + escXml(invoiceNumber) + '</REFERENCE>',
+    ...(postingMode === 'INVENTORY_ITEMWISE'
+      ? [
+          '            <ISINVOICE>Yes</ISINVOICE>',
+          '            <PERSISTEDVIEW>Invoice Voucher View</PERSISTEDVIEW>',
+        ]
+      : []),
+    '            <PARTYLEDGERNAME>' + escXml(vendorName) + '</PARTYLEDGERNAME>',
+    '            <NARRATION>' + escXml(narration) + '</NARRATION>',
+    '            <ALLLEDGERENTRIES.LIST>',
+    '              <LEDGERNAME>' + escXml(vendorName) + '</LEDGERNAME>',
+    '              <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>',
+    '              <AMOUNT>-' + Number(grandTotal).toFixed(2) + '</AMOUNT>',
+    '            </ALLLEDGERENTRIES.LIST>',
+    purchaseLedgerEntryXml,
+    taxLedgerEntries.join(''),
+    postingMode === 'INVENTORY_ITEMWISE' ? inventoryEntriesXml : '',
+    '          </VOUCHER>',
+    '        </TALLYMESSAGE>',
+    '      </REQUESTDATA>',
+    '    </IMPORTDATA>',
+    '  </BODY>',
+    '</ENVELOPE>',
+  ].join('\n').trim();
+
+  const preValidationStatus = validationErrors.length ? 'EXCEPTION' : 'OK';
+  const idempotencySkip = Boolean(sourceJson.idempotency_skip) || preValidationStatus === 'EXCEPTION';
+  const idempotencyReason =
+    preValidationStatus === 'EXCEPTION'
+      ? ('Skipping post due to pre-validation errors: ' + validationErrors.join(', '))
+      : (cleanText(sourceJson.idempotency_reason) || null);
+
+  const supportLedgerNames = dedupeLedgers([purchaseLedgerName, tds ? tdsLedgerName : '', roundOff ? roundOffLedgerName : '']);
+
+  const debug = {
+    tax_mode: taxMode,
+    line_items_count: lineItems.length,
+      used_top_level_fallback: usedTopLevelFallback,
+      posting_mode: postingMode,
+      totals: {
+        header_taxable: headerTaxable,
+        line_taxable_sum: lineTaxableSum,
+        hsn_taxable_total: hsnTaxableTotal,
+        header_cgst: headerCgst,
+        header_sgst: headerSgst,
+        header_igst: headerIgst,
+        mode_cgst: cgstFromMode,
+        mode_sgst: sgstFromMode,
+        mode_igst: igstFromMode,
+        hsn_cgst_total: sumBy(hsnTaxSummary, 'cgst'),
+        hsn_sgst_total: sumBy(hsnTaxSummary, 'sgst'),
+        hsn_igst_total: sumBy(hsnTaxSummary, 'igst'),
+        computed_cgst: cgstTotal,
+        computed_sgst: sgstTotal,
+        computed_igst: igstTotal,
+      tds,
+      round_off: roundOff,
+      header_total: headerTotal,
+      computed_total: computedGrand,
+      final_total: grandTotal,
+    },
+    validation_errors: validationErrors,
+    generated_xml_preview: voucherXml.slice(0, 2000),
+  };
+
+  return {
+    json: {
+      ...item.json,
+      ...sourceJson,
+      approvedData: {
+        ...(sourceJson.approvedData && typeof sourceJson.approvedData === 'object' ? sourceJson.approvedData : {}),
+        line_items: lineItems,
+        hsn_tax_summary: hsnTaxSummary,
+        tax_mode: taxMode,
+      },
+      line_items: lineItems,
+      hsn_tax_summary: hsnTaxSummary,
+      tax_mode: taxMode,
+      posting_mode: postingMode,
+      purchase_ledger_name: purchaseLedgerName,
+      tax_ledger_names: dedupeLedgers(taxLedgerNames),
+      support_ledger_names: supportLedgerNames,
+      computed_totals: {
+        taxable,
+        hsn_taxable_total: hsnTaxableTotal,
+        hsn_cgst_total: sumBy(hsnTaxSummary, 'cgst'),
+        hsn_sgst_total: sumBy(hsnTaxSummary, 'sgst'),
+        hsn_igst_total: sumBy(hsnTaxSummary, 'igst'),
+        cgst: cgstTotal,
+        sgst: sgstTotal,
+        igst: igstTotal,
+        tds,
+        round_off: roundOff,
+        total: grandTotal,
+        expected_total: computedGrand,
+        line_total: lineTaxableSum,
+      },
+      tallyPreValidation: {
+        status: preValidationStatus,
+        errors: validationErrors,
+      },
+      idempotency_skip: idempotencySkip,
+      idempotency_reason: idempotencyReason,
+      tallyXml: idempotencySkip ? noOpXml() : voucherXml,
+      voucherRequestXml: idempotencySkip ? noOpXml() : voucherXml,
+      tallyDebug: debug,
+    },
+  };
+});

@@ -1,0 +1,195 @@
+    await query(
+      `INSERT INTO audit_logs (
+          tenant_id, branch_id, invoice_id, action_type, entity_type, entity_id,
+          performed_by_user_id, new_value, notes, metadata
+       )
+       VALUES ($1, $2, $3, 'REJECTED', 'INVOICE', $3, $4, $5::jsonb, $6, $7::jsonb)`,
+      [
+        tenantId,
+        context.branchId,
+        invoiceId,
+        context.userId,
+        JSON.stringify({ status: 'REJECTED' }),
+        reason,
+        JSON.stringify({ source: 'ui' })
+      ]
+    );
+
+    return updated;
+  },
+
+  async listReviewQueue(tenantId, branchId, dateRange = null) {
+    const params = branchId ? [tenantId, branchId] : [tenantId];
+    const reviewDateFilter = dateRangeFilterSql(dateRange, "COALESCE(i.invoice_date, i.created_at::date)");
+    const result = await query(
+      `SELECT
+          i.id,
+          i.business_status AS "status",
+          i.document_type AS "documentType",
+          COALESCE(i.party_name, '-') AS "partyName",
+          COALESCE(i.party_gstin, '-') AS "gstin",
+          COALESCE(i.invoice_number, '-') AS "invoiceNumber",
+          i.invoice_date AS "invoiceDate",
+          COALESCE(b.branch_name, b.branch_code, '-') AS "branch",
+          COALESCE(i.total_amount, 0)::numeric(14,2) AS "totalAmount",
+          COALESCE(jsonb_array_length(i.low_confidence_fields), 0) + COALESCE(jsonb_array_length(i.warnings), 0) AS "issuesCount",
+          EXISTS (
+            SELECT 1
+            FROM invoices d
+            WHERE d.tenant_id = i.tenant_id
+              AND d.document_type = i.document_type
+              AND d.dedupe_key IS NOT NULL
+              AND d.dedupe_key = i.dedupe_key
+              AND d.id <> i.id
+          ) AS "isDuplicate",
+          i.extracted_json AS "extractedJson",
+          i.warnings AS "warnings"
+       FROM invoices i
+       LEFT JOIN branches b ON b.id = i.branch_id AND b.tenant_id = i.tenant_id
+       WHERE i.tenant_id = $1${branchFilterSql(branchId)}
+         AND i.business_status IN ('UPLOADED', 'EXTRACTING', 'PENDING_REVIEW', 'NEEDS_CORRECTION')
+         ${reviewDateFilter}
+       ORDER BY i.updated_at DESC
+       LIMIT 300`,
+      params
+    );
+
+    return result.rows;
+  },
+
+  async listPostingRows(tenantId, branchId, dateRange = null) {
+    const params = branchId ? [tenantId, branchId] : [tenantId];
+    const postingDateFilter = dateRangeFilterSql(dateRange, "COALESCE(i.invoice_date, i.updated_at::date)");
+
+    const result = await query(
+      `SELECT
+          i.id,
+          i.business_status AS "status",
+          i.tally_posting_status AS "tallyPostingStatus",
+          i.document_type AS "documentType",
+          COALESCE(i.party_name, '-') AS "partyName",
+          COALESCE(b.branch_name, b.branch_code, '-') AS "branch",
+          COALESCE(i.invoice_date, i.updated_at::date) AS "date",
+          COALESCE(i.total_amount, 0)::numeric(14,2) AS "amount",
+          COALESCE(i.approved_by, '-') AS "approvedBy",
+          COALESCE(i.posting_request_xml_generated_at, i.updated_at) AS "postingDraftGeneratedAt",
+          i.posting_request_xml_reviewed_at AS "postingDraftReviewedAt",
+          i.posting_request_xml_reviewed_by AS "postingDraftReviewedBy",
+          COALESCE(i.tally_response_metadata->>'postedBy', 'System') AS "postedBy",
+          COALESCE(i.tally_voucher_type, '-') AS "voucherType",
+          COALESCE(i.tally_voucher_number, '-') AS "voucherNumber",
+           i.posting_error_message AS "lastFailureReason",
+           COALESCE(i.posting_error_message, i.tally_response_metadata->>'summary', '-') AS "responseSummary"
+       FROM invoices i
+       LEFT JOIN branches b ON b.id = i.branch_id AND b.tenant_id = i.tenant_id
+       WHERE i.tenant_id = $1${branchFilterSql(branchId)}
+         ${postingDateFilter}
+         AND i.business_status IN ('APPROVED', 'PENDING_POSTING_REVIEW', 'POSTING', 'POSTED', 'POST_FAILED')
+       ORDER BY i.updated_at DESC
+       LIMIT 300`,
+      params
+    );
+
+    return result.rows;
+  },
+
+  async postingSummary(tenantId, branchId, dateRange = null) {
+    const params = branchId ? [tenantId, branchId] : [tenantId];
+    const postingSummaryDateFilter = dateRangeFilterSql(dateRange, "COALESCE(i.invoice_date, i.updated_at::date)");
+    const result = await query(
+      `SELECT
+          COUNT(*) FILTER (WHERE i.business_status = 'APPROVED')::int AS "awaitingPosting",
+          COUNT(*) FILTER (WHERE i.business_status = 'PENDING_POSTING_REVIEW')::int AS "awaitingPostingReview",
+          COUNT(*) FILTER (WHERE i.business_status = 'POSTING')::int AS "currentlyPosting",
+          COUNT(*) FILTER (WHERE i.business_status = 'POSTED' AND i.updated_at::date = current_date)::int AS "postedToday",
+          COUNT(*) FILTER (WHERE i.business_status = 'POST_FAILED' AND i.updated_at::date = current_date)::int AS "failedToday"
+       FROM invoices i
+       WHERE i.tenant_id = $1${branchFilterSql(branchId)}${postingSummaryDateFilter}`,
+      params
+    );
+
+    return result.rows[0] || {
+      awaitingPosting: 0,
+      awaitingPostingReview: 0,
+      currentlyPosting: 0,
+      postedToday: 0,
+      failedToday: 0
+    };
+  },
+
+  async listPostingReviewRows(tenantId, branchId, dateRange = null) {
+    const params = branchId ? [tenantId, branchId] : [tenantId];
+    const reviewDateFilter = dateRangeFilterSql(dateRange, "COALESCE(i.invoice_date, i.updated_at::date)");
+    const result = await query(
+      `SELECT
+          i.id,
+          i.business_status AS "status",
+          i.document_type AS "documentType",
+          COALESCE(i.party_name, '-') AS "partyName",
+          COALESCE(i.invoice_number, '-') AS "invoiceNumber",
+          COALESCE(b.branch_name, b.branch_code, '-') AS "branch",
+          COALESCE(i.invoice_date, i.updated_at::date) AS "invoiceDate",
+          COALESCE(i.total_amount, 0)::numeric(14,2) AS "totalAmount",
+          i.posting_request_xml_generated_at AS "generatedAt",
+          i.posting_request_xml_reviewed_at AS "reviewedAt",
+          i.posting_request_xml_reviewed_by AS "reviewedBy"
+       FROM invoices i
+       LEFT JOIN branches b ON b.id = i.branch_id AND b.tenant_id = i.tenant_id
+       WHERE i.tenant_id = $1${branchFilterSql(branchId)}
+         ${reviewDateFilter}
+         AND i.business_status = 'PENDING_POSTING_REVIEW'
+       ORDER BY i.updated_at DESC
+       LIMIT 300`,
+      params
+    );
+
+    return result.rows;
+  },
+
+  async listAuditRows(tenantId, branchId, dateRange = null) {
+    const params = branchId ? [tenantId, branchId] : [tenantId];
+    const auditDateCondition = dateRangeConditionSql(dateRange, "a.created_at::date");
+
+    const eventsResult = await query(
+      `SELECT
+          to_char(a.created_at, 'YYYY-MM-DD HH24:MI:SS') AS "timestamp",
+          COALESCE(i.invoice_number, '-') AS "invoiceNumber",
+          CASE WHEN i.document_type = 'SALES_INVOICE' THEN 'Sales' ELSE 'Purchase' END AS "invoiceType",
+          COALESCE(t.tenant_code, '-') AS "tenant",
+          COALESCE(b.branch_name, b.branch_code, '-') AS "branch",
+          a.action_type AS "action",
+          COALESCE(u.full_name, 'System') AS "performedBy",
+          COALESCE(a.old_value::text, '-') AS "oldValue",
+          COALESCE(a.new_value::text, '-') AS "newValue",
+          COALESCE(a.notes, '-') AS "notes"
+       FROM audit_logs a
+       LEFT JOIN invoices i ON i.id = a.invoice_id
+       LEFT JOIN tenants t ON t.id = a.tenant_id
+       LEFT JOIN branches b ON b.id = a.branch_id AND b.tenant_id = a.tenant_id
+       LEFT JOIN users u ON u.id = a.performed_by_user_id
+       WHERE a.tenant_id = $1${branchId ? " AND a.branch_id = $2" : ""}${auditDateCondition ? ` AND ${auditDateCondition}` : ""}
+       ORDER BY a.created_at DESC
+       LIMIT 500`,
+      params
+    );
+
+    const filtersResult = await query(
+      `SELECT
+          COALESCE(array_agg(DISTINCT t.tenant_code) FILTER (WHERE t.tenant_code IS NOT NULL), '{}') AS "tenants",
+          COALESCE(array_agg(DISTINCT b.branch_name) FILTER (WHERE b.branch_name IS NOT NULL), '{}') AS "branches",
+          COALESCE(array_agg(DISTINCT u.full_name) FILTER (WHERE u.full_name IS NOT NULL), '{}') AS "users",
+          COALESCE(array_agg(DISTINCT a.action_type) FILTER (WHERE a.action_type IS NOT NULL), '{}') AS "actions"
+       FROM audit_logs a
+       LEFT JOIN tenants t ON t.id = a.tenant_id
+       LEFT JOIN branches b ON b.id = a.branch_id AND b.tenant_id = a.tenant_id
+       LEFT JOIN users u ON u.id = a.performed_by_user_id
+       WHERE a.tenant_id = $1${branchId ? " AND a.branch_id = $2" : ""}${auditDateCondition ? ` AND ${auditDateCondition}` : ""}`,
+      params
+    );
+
+    return {
+      items: eventsResult.rows,
+      filters: filtersResult.rows[0] || { tenants: [], branches: [], users: [], actions: [] }
+    };
+  }
+};

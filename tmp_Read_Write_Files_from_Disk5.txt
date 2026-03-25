@@ -1,0 +1,46 @@
+={{ (() => {
+  const clean = (v) => String(v ?? '').trim().replace(/^[\'\"]|[\'\"]$/g, '');
+  const pick = (...vals) => {
+    for (const v of vals) {
+      const s = clean(v);
+      if (s) return s;
+    }
+    return '';
+  };
+
+  const names = ['Code in JavaScript6', 'Tenant Context Guard', 'tenant specific file path extractor', 'Code in JavaScript5', 'Select rows from a table', 'approval flow'];
+  let cfg = {};
+  for (const name of names) {
+    try {
+      const rows = $items(name, 0, typeof $runIndex === 'number' ? $runIndex : 0);
+      if (Array.isArray(rows) && rows[0] && rows[0].json) { cfg = rows[0].json; break; }
+    } catch (_e) {}
+  }
+
+  const dir = pick(
+    $json.exceptionFolder, $json.exception_folder, $json.tallyxmlExceptionpath,
+    $json.body?.exceptionFolder, $json.body?.exception_folder, $json.body?.tallyxmlExceptionpath,
+    $json.approvedData?.exceptionFolder, $json.approvedData?.exception_folder, $json.approvedData?.tallyxmlExceptionpath,
+    $json.body?.approvedData?.exceptionFolder, $json.body?.approvedData?.exception_folder, $json.body?.approvedData?.tallyxmlExceptionpath,
+    $json.runtimeConfig?.paths?.exceptions, $json.runtimeConfig?.paths?.exception,
+    $json.approvedData?.runtimeConfig?.paths?.exceptions, $json.approvedData?.runtimeConfig?.paths?.exception,
+    cfg.exceptionFolder, cfg.exception_folder, cfg.tallyxmlExceptionpath,
+    cfg.body?.exceptionFolder, cfg.body?.exception_folder, cfg.body?.tallyxmlExceptionpath,
+    cfg.runtimeConfig?.paths?.exceptions, cfg.runtimeConfig?.paths?.exception
+  );
+
+  const binaryName = pick($binary?.data?.fileName, $binary?.data?.file_name);
+  const jsonName = pick($json.fileName, $json.file_name, $json.body?.fileName, $json.body?.file_name);
+  const srcPath = pick(
+    $json.originalPath, $json.originalFilePath, $json.filePath, $json.path,
+    $json.body?.originalPath, $json.body?.originalFilePath, $json.body?.filePath, $json.body?.path,
+    $json.approvedData?.originalPath, $json.approvedData?.originalFilePath, $json.approvedData?.filePath, $json.approvedData?.path,
+    cfg.originalPath, cfg.originalFilePath, cfg.filePath, cfg.path
+  );
+
+  const baseWithExt = (binaryName || jsonName || (srcPath ? srcPath.split(/[\\/]/).pop() : '') || 'invoice.xlsx').split(/[\\/]/).pop() || 'invoice.xlsx';
+  const base = baseWithExt.replace(/\.xlsx$/i, '').replace(/\.xml$/i, '');
+
+  if (!dir) return '__MISSING_TENANT_EXCEPTION_DIR__/' + base + '_tally_response.xml';
+  return dir.replace(/[\\/]+$/, '') + '/' + base + '_tally_response.xml';
+})() }}

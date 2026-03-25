@@ -1,0 +1,41 @@
+const webhook = $node["Webhook"].json.body ?? $node["Webhook"].json ?? {};
+const response = $json?.data && typeof $json.data === 'object' ? $json.data : ($json || {});
+
+const runtimePaths = response?.storage?.paths && typeof response.storage.paths === 'object'
+  ? response.storage.paths
+  : (webhook.runtimeConfig?.paths || {});
+
+const runtimeContext = {
+  invoiceId: response.invoiceId || webhook.invoiceId || webhook.invoice_id || webhook.id || null,
+  tenantId: response.tenantId || webhook.tenantId || webhook.tenant_id || null,
+  branchId: response.branchId || webhook.branchId || webhook.branch_id || null,
+  requestId: webhook.requestId || webhook.request_id || webhook.headers?.['x-request-id'] || null,
+  authToken: webhook.authToken || webhook.auth_token || null,
+  storageMode: response.storage?.storageMode || webhook.storageMode || null,
+  paths: {
+    incoming: runtimePaths.incoming || webhook.incomingFolder || null,
+    review: runtimePaths.review || webhook.reviewFolder || null,
+    processed: runtimePaths.processed || webhook.processedFolder || null,
+    success: runtimePaths.success || webhook.successFolder || null,
+    exception: runtimePaths.exception || webhook.exceptionFolder || null,
+    output: runtimePaths.output || webhook.outputFolder || null
+  }
+};
+
+return [{
+  json: {
+    ...webhook,
+    runtimeContext,
+    runtimeConfig: {
+      tenantId: runtimeContext.tenantId,
+      branchId: runtimeContext.branchId,
+      paths: runtimeContext.paths
+    },
+    incomingFolder: runtimeContext.paths.incoming,
+    reviewFolder: runtimeContext.paths.review,
+    processedFolder: runtimeContext.paths.processed,
+    successFolder: runtimeContext.paths.success,
+    exceptionFolder: runtimeContext.paths.exception,
+    outputFolder: runtimeContext.paths.output
+  }
+}];

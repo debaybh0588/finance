@@ -1,0 +1,470 @@
+    payload.responsePreview,
+    payload.response_preview,
+    payload.response,
+    payload.rawResponse,
+    responseMetadata.responsePreview,
+    responseMetadata.response_preview,
+    responseMetadata.response,
+    responseMetadata.rawResponse
+  ];
+
+  if (responseMetadata.payload && typeof responseMetadata.payload === "object") {
+    try {
+      textSources.push(JSON.stringify(responseMetadata.payload));
+    } catch {
+      // ignore circular payloads
+    }
+  }
+
+  if (invoice?.postingRequestXml) {
+    textSources.push(invoice.postingRequestXml);
+  }
+
+  for (const source of textSources) {
+    const hints = parseVoucherHintsFromText(source);
+    if (!voucherType && hints.voucherType) {
+      voucherType = hints.voucherType;
+    }
+    if (!voucherNumber && hints.voucherNumber) {
+      voucherNumber = hints.voucherNumber;
+    }
+    if (voucherType && voucherNumber) break;
+  }
+
+  return {
+    voucherType,
+    voucherNumber
+  };
+};
+
+const isIgnorableTallyMasterLineError = (lineError) => {
+  const text = String(lineError || "").trim();
+  if (!text) return false;
+
+  if (/^Cannot alter Units of\b/i.test(text)) {
+    return true;
+  }
+
+  if (/Stock Group\s+(?:'|&apos;)?Primary(?:'|&apos;)?\s+does not exist!?/i.test(text)) {
+    return true;
+  }
+
+  return false;
+};
+
+const resolveInvoiceListFilters = (query = {}) => {
+  const documentTypeInput = normalizeQueryText(query.documentType || query.invoiceType);
+  const documentType =
+    documentTypeInput === "purchase" || documentTypeInput === "PURCHASE_INVOICE"
+      ? "PURCHASE_INVOICE"
+      : documentTypeInput === "sales" || documentTypeInput === "SALES_INVOICE"
+        ? "SALES_INVOICE"
+        : null;
+
+  const status = normalizeQueryText(query.status);
+  const extractionStatus = normalizeQueryText(query.extractionStatus);
+  const dateRange = normalizeQueryText(query.dateRange);
+  const duplicateFlag = normalizeQueryText(query.duplicateFlag)?.toLowerCase() || null;
+
+  return {
+    search: normalizeQueryText(query.search),
+    documentType,
+    status: status && status !== "all-status" ? status : null,
+    extractionStatus: extractionStatus && extractionStatus !== "all" ? extractionStatus : null,
+    dateRange: dateRange && dateRange !== "all" ? dateRange : null,
+    duplicateFlag: duplicateFlag === "yes" || duplicateFlag === "no" ? duplicateFlag : null
+  };
+};
+
+export const invoicesService = {
+  async bulkUploadInvoices({ context, body = {}, files = [] }) {
+    const requestedTenantId = toOptionalString(body.tenantId ?? body.tenant_id);
+    const requestedBranchId = toOptionalString(body.branchId ?? body.branch_id);
+    const tenantId = context.role === "SUPER_ADMIN" ? requestedTenantId : (context.tenantId || requestedTenantId);
+    const branchId = context.role === "SUPER_ADMIN" ? requestedBranchId : (context.branchId || requestedBranchId);
+    const documentType = resolveBulkDocumentType(body.documentType ?? body.document_type);
+
+    if (!tenantId) {
+      throw createError("tenantId is required", 400, "VALIDATION_ERROR");
+    }
+
+    if (!branchId) {
+      throw createError("branchId is required", 400, "VALIDATION_ERROR");
+    }
+
+    if (!Array.isArray(files) || files.length === 0) {
+      throw createError("files[] is required", 400, "VALIDATION_ERROR");
+    }
+    if (files.length > maxBulkUploadFiles) {
+      throw createError(`Maximum ${maxBulkUploadFiles} files are allowed per upload request`, 400, "FILE_LIMIT_EXCEEDED");
+    }
+
+    if (context.role !== "SUPER_ADMIN" && context.tenantId && context.tenantId !== tenantId) {
+      throw createError("Forbidden", 403, "FORBIDDEN");
+    }
+    if (context.role !== "SUPER_ADMIN" && context.branchId && context.branchId !== branchId) {
+      throw createError("Forbidden", 403, "FORBIDDEN");
+    }
+
+    const branchExists = await invoiceRuntimeRepository.branchExistsForTenant(tenantId, branchId);
+    if (!branchExists) {
+      throw createError("branchId is invalid for tenantId", 400, "VALIDATION_ERROR");
+    }
+
+    const storage = await storageService.resolveStoragePaths({ tenantId, branchId });
+    const incomingPath = toOptionalString(storage?.paths?.incoming);
+    const runtimePaths = storage?.paths && typeof storage.paths === "object" ? storage.paths : {};
+
+    if (!incomingPath) {
+      throw createError("Incoming storage path is not configured", 422, "STORAGE_CONFIG_INVALID");
+    }
+
+    const resolvedIncomingPath = resolveSafeDirectoryPath(incomingPath, "Incoming storage path");
+    await mkdir(resolvedIncomingPath, { recursive: true });
+
+    const batchId = randomUUID();
+    const items = [];
+    const errors = [];
+    const n8nDispatch = {
+      attempted: false,
+      dispatched: 0,
+      skippedReason: null
+    };
+
+    for (const file of files) {
+      const fileName = sanitizeUploadFileName(file?.originalname);
+      const mimeType = toOptionalString(file?.mimetype)?.toLowerCase() || null;
+      const fileBuffer = file?.buffer;
+      const fileSize = Number(file?.size || 0);
+
+      if (!Buffer.isBuffer(fileBuffer) || fileSize <= 0) {
+        errors.push({ fileName, code: "EMPTY_FILE", message: "File is empty" });
+        continue;
+      }
+
+      if (!mimeType || !allowedUploadMimeTypes.has(mimeType)) {
+        errors.push({ fileName, code: "UNSUPPORTED_MIME_TYPE", message: "Unsupported file type" });
+        continue;
+      }
+
+      const storedName = `${Date.now()}-${randomUUID()}-${fileName}`;
+      const originalFilePath = resolveSafeChildPath(resolvedIncomingPath, storedName);
+      const sourceHash = createHash("sha256").update(fileBuffer).digest("hex");
+
+      try {
+        await writeFile(originalFilePath, fileBuffer);
+
+        const created = await invoiceRuntimeRepository.insertUploadedInvoice(tenantId, {
+          branchId,
+          documentType,
+          fileName,
+          mimeType,
+          originalFilePath,
+          sourceHash,
+          dedupeKey: null,
+          createdByUserId: context.userId || null
+        });
+
+        if (!created) {
+          errors.push({ fileName, code: "CREATE_FAILED", message: "Failed to create invoice record" });
+          continue;
+        }
+
+        items.push({
+          fileName,
+          invoiceId: created.id,
+          status: created.status,
+          mimeType: created.mimeType,
+          documentType: created.documentType || "AUTO",
+          _filePath: originalFilePath
+        });
+      } catch (error) {
+        if (error?.code === "23505" && String(error.constraint || "").includes("source_hash")) {
+          errors.push({ fileName, code: "SOURCE_HASH_EXISTS", message: "Duplicate file detected by source hash" });
+          continue;
+        }
+
+        errors.push({
+          fileName,
+          code: error?.code || "UPLOAD_FAILED",
+          message: error?.message || "Failed to upload file"
+        });
+      }
+    }
+
+    // Fire n8n extraction webhooks (fire-and-forget) for every successfully registered invoice
+    if (items.length > 0) {
+      n8nDispatch.attempted = true;
+      const n8nConfig = await superAdminTenantRepository
+        .findN8nConfigByTenantId(tenantId)
+        .catch(() => null);
+
+      if (n8nConfig?.isActive && n8nConfig?.n8nBaseUrl && n8nConfig?.extractionWebhookPlaceholder) {
+        const baseUrl = n8nConfig.n8nBaseUrl.replace(/\/+$/, "");
+        const hookPath = n8nConfig.extractionWebhookPlaceholder.startsWith("/")
+          ? n8nConfig.extractionWebhookPlaceholder
+          : `/${n8nConfig.extractionWebhookPlaceholder}`;
+        const webhookUrl = `${baseUrl}${hookPath}`;
+        const workflowKey = String(n8nConfig.workflowKeyToken || "").trim();
+        const backendApiBaseUrl = toOptionalString(n8nConfig.backendApiBaseUrl);
+        if (!workflowKey) {
+          n8nDispatch.skippedReason = "N8N_WORKFLOW_KEY_MISSING";
+          console.warn(`[n8n] Skipping extraction webhook for tenant ${tenantId}: workflowKeyToken missing`);
+          return {
+            batchId,
+            items: items.map(({ _filePath: _fp, ...rest }) => rest),
+            errors,
+            n8n: n8nDispatch
+          };
+        }
+
+        for (const item of items) {
+          const headers = { "Content-Type": "application/json" };
+          headers["x-workflow-key"] = workflowKey;
+
+          fetch(webhookUrl, {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              batchId,
+              invoiceId: item.invoiceId,
+              tenantId,
+              branchId,
+              documentType: item.documentType,
+              fileName: item.fileName,
+              filePath: item._filePath,
+              originalPath: item._filePath,
+              originalFilePath: item._filePath,
+              mimeType: item.mimeType || null,
+              backendApiBaseUrl: backendApiBaseUrl || null,
+              n8nRootFolder: n8nConfig.n8nRootFolder || null,
+              runtimeContext: {
+                invoiceId: item.invoiceId,
+                tenantId,
+                branchId,
+                requestId: context.requestId || null,
+                authToken: null,
+                apiBaseUrl: backendApiBaseUrl || null,
+                storageMode: storage?.storageMode || null,
+                paths: {
+                  incoming: runtimePaths.incoming || null,
+                  review: runtimePaths.review || null,
+                  processed: runtimePaths.processed || null,
+                  success: runtimePaths.success || null,
+                  exception: runtimePaths.exception || null,
+                  output: runtimePaths.output || null
+                }
+              },
+              runtimeConfig: {
+                tenantId,
+                branchId,
+                apiBaseUrl: backendApiBaseUrl || null,
+                paths: {
+                  incoming: runtimePaths.incoming || null,
+                  review: runtimePaths.review || null,
+                  processed: runtimePaths.processed || null,
+                  success: runtimePaths.success || null,
+                  exception: runtimePaths.exception || null,
+                  output: runtimePaths.output || null
+                }
+              },
+              incomingFolder: runtimePaths.incoming || null,
+              reviewFolder: runtimePaths.review || null,
+              processedFolder: runtimePaths.processed || null,
+              successFolder: runtimePaths.success || null,
+              exceptionFolder: runtimePaths.exception || null,
+              outputFolder: runtimePaths.output || null
+            })
+          }).catch((err) => {
+            console.error(`[n8n] Extraction webhook failed for invoice ${item.invoiceId}: ${err.message}`);
+          });
+
+          n8nDispatch.dispatched += 1;
+        }
+      } else if (!n8nConfig?.isActive) {
+        n8nDispatch.skippedReason = "N8N_INACTIVE";
+        console.warn(`[n8n] Skipping extraction webhook for tenant ${tenantId}: config missing or inactive`);
+      } else {
+        n8nDispatch.skippedReason = "N8N_WEBHOOK_NOT_CONFIGURED";
+        console.warn(
+          `[n8n] Skipping extraction webhook for tenant ${tenantId}: n8nBaseUrl/extractionWebhookPlaceholder missing`
+        );
+      }
+    }
+
+    return {
+      batchId,
+      items: items.map(({ _filePath: _fp, ...rest }) => rest),
+      errors,
+      n8n: n8nDispatch
+    };
+  },
+
+  async registerInvoice(context, payload = {}) {
+    const normalized = normalizeRegisterPayload(context, payload);
+
+    try {
+      return await invoiceRuntimeRepository.registerInvoice(context.tenantId, normalized);
+    } catch (error) {
+      if (error?.code === "23505") {
+        if (String(error.constraint || "").includes("source_hash")) {
+          throw createError("Invoice already registered for this source_hash", 409, "SOURCE_HASH_EXISTS");
+        }
+        if (String(error.constraint || "").includes("dedupe")) {
+          throw createError("Invoice dedupe_key conflict", 409, "DEDUPE_KEY_CONFLICT");
+        }
+      }
+      throw error;
+    }
+  },
+
+  async dashboard(context, query = {}) {
+    const scope = resolveDashboardScope(context, query);
+
+    const { statusRows, perDayRows, vendorRows, topPartyRows, typeSplitRows } = await invoiceReadRepository.getDashboardRows(
+      scope.tenantId,
+      scope.branchId
+    );
+
+    const statusMap = new Map(statusRows.map((row) => [row.status, row.count]));
+    const typeSplitMap = new Map(typeSplitRows.map((row) => [row.documentType, row]));
+    const vendorPartyRows = topPartyRows
+      .filter((row) => row.documentType === "PURCHASE_INVOICE")
+      .slice(0, 5)
+      .map((row) => ({ name: row.name, amount: Number(row.amount || 0) }));
+    const customerPartyRows = topPartyRows
+      .filter((row) => row.documentType === "SALES_INVOICE")
+      .slice(0, 5)
+      .map((row) => ({ name: row.name, amount: Number(row.amount || 0) }));
+    const countsByStatus = Object.fromEntries(statusRows.map((row) => [row.status, row.count]));
+
+    return {
+      countsByStatus,
+      lifecycleCounts: {
+        uploaded: statusMap.get("UPLOADED") || 0,
+        extracting: statusMap.get("EXTRACTING") || 0,
+        pendingReview: statusMap.get("PENDING_REVIEW") || 0,
+        approved: statusMap.get("APPROVED") || 0,
+        posting: statusMap.get("POSTING") || 0,
+        posted: statusMap.get("POSTED") || 0,
+        failed: (statusMap.get("POST_FAILED") || 0) + (statusMap.get("FAILED") || 0)
+      },
+      dailyProcessedCounts: perDayRows,
+      topParties: {
+        vendors: vendorPartyRows,
+        customers: customerPartyRows
+      },
+      purchaseVsSalesSplit: {
+        purchase: {
+          count: typeSplitMap.get("PURCHASE_INVOICE")?.count || 0,
+          amount: Number(typeSplitMap.get("PURCHASE_INVOICE")?.amount || 0)
+        },
+        sales: {
+          count: typeSplitMap.get("SALES_INVOICE")?.count || 0,
+          amount: Number(typeSplitMap.get("SALES_INVOICE")?.amount || 0)
+        }
+      },
+      metrics: [
+        { label: "Uploaded", value: statusMap.get("UPLOADED") || 0, color: "var(--primary-blue)" },
+        { label: "Pending Review", value: statusMap.get("PENDING_REVIEW") || 0, color: "var(--warning-orange)" },
+        { label: "Approved", value: statusMap.get("APPROVED") || 0, color: "var(--purple)" },
+        { label: "Posted", value: statusMap.get("POSTED") || 0, color: "var(--success-green)" }
+      ],
+      lifecycle: [
+        { name: "Uploaded", count: statusMap.get("UPLOADED") || 0, color: "var(--primary-blue)" },
+        { name: "Extracting", count: statusMap.get("EXTRACTING") || 0, color: "var(--primary-blue-2)" },
+        { name: "Pending Review", count: statusMap.get("PENDING_REVIEW") || 0, color: "var(--warning-orange)" },
+        { name: "Approved", count: statusMap.get("APPROVED") || 0, color: "var(--purple)" },
+        { name: "Posting", count: statusMap.get("POSTING") || 0, color: "var(--primary-blue)" },
+        { name: "Posted", count: statusMap.get("POSTED") || 0, color: "var(--success-green)" },
+        { name: "Failed", count: (statusMap.get("POST_FAILED") || 0) + (statusMap.get("FAILED") || 0), color: "var(--danger-red)" }
+      ],
+      perDay: perDayRows,
+      vendors: vendorRows.map((vendor, index) => ({
+        name: vendor.name,
+        amount: Number(vendor.amount || 0),
+        color: ["var(--primary-blue)", "var(--purple)", "var(--success-green)", "var(--warning-orange)", "var(--primary-blue-2)"][index % 5]
+      })),
+      meta: {
+        tenantId: scope.tenantId,
+        branchId: scope.branchId
+      }
+    };
+  },
+
+  async list({ context, query }) {
+    const scope = resolveListScope(context, query);
+    const filters = resolveInvoiceListFilters(query);
+    const items = await invoiceReadRepository.listInvoices(scope.tenantId, scope.branchId, filters);
+    return {
+      items,
+      filters: {
+        tenants: [scope.tenantId],
+        branches: [...new Set(items.map((item) => item.branchName || item.branch))]
+      },
+      meta: {
+        tenantId: scope.tenantId,
+        branchId: scope.branchId,
+        query,
+        appliedFilters: filters
+      }
+    };
+  },
+
+  async getById(invoiceId, context) {
+    const normalizedId = requireInvoiceId(invoiceId);
+    const detail = await invoiceReadRepository.getInvoiceDetail(normalizedId, context.tenantId);
+
+    if (!detail) {
+      throw createError("Invoice not found for tenant", 404, "INVOICE_NOT_FOUND");
+    }
+
+    return detail;
+  },
+
+  async reviewInvoice(invoiceId, context, payload = {}) {
+    const normalizedId = requireInvoiceId(invoiceId);
+    const updated = await invoiceReadRepository.updateReview(
+      normalizedId,
+      context.tenantId,
+      {
+        correctedJson: payload.corrected_json || {},
+        notes: payload.notes || null
+      },
+      context
+    );
+
+    if (!updated) {
+      throw createError("Invoice not found for tenant", 404, "INVOICE_NOT_FOUND");
+    }
+
+    return updated;
+  },
+
+  async markExtractionStarted(invoiceId, context, payload = {}) {
+    const normalizedInvoiceId = requireInvoiceId(invoiceId);
+    const client = await invoiceExtractionRepository.getClient();
+
+    try {
+      await client.query("BEGIN");
+      const invoice = await ensureInvoice(normalizedInvoiceId, context.tenantId, client);
+      const updatedInvoice = await invoiceExtractionRepository.markExtractionStarted(client, normalizedInvoiceId, context.tenantId, {
+        retryCount: toRetryCount(payload.retry_count, invoice.retryCount),
+        rawModelOutput: payload.raw_model_output ? toObject(payload.raw_model_output, "raw_model_output") : null
+      });
+      await client.query("COMMIT");
+      return updatedInvoice;
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  },
+
+  async applyExtractionResult(invoiceId, context, payload) {
+    const normalizedInvoiceId = requireInvoiceId(invoiceId);
+    const normalizedPayload = normalizeExtractionPayload(payload);
+    const client = await invoiceExtractionRepository.getClient();
+
+    try {

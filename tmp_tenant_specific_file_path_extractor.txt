@@ -1,0 +1,56 @@
+const item = $input.first();
+const source = item?.json ?? {};
+const binary = item?.binary ?? {};
+const data = binary.data ?? {};
+const runtimeContext = source.runtimeContext || {};
+
+const path =
+  runtimeContext.originalPath ??
+  source.originalPath ??
+  source.originalFilePath ??
+  source.filePath ??
+  source.path ??
+  source.body?.originalPath ??
+  source.body?.originalFilePath ??
+  source.body?.filePath ??
+  source.body?.path ??
+  '';
+
+const mimeType =
+  source.mimeType ??
+  source.fileMimeType ??
+  source.body?.mimeType ??
+  data.mimeType ??
+  null;
+
+const fileName =
+  source.fileName ??
+  source.file_name ??
+  source.body?.fileName ??
+  source.body?.file_name ??
+  data.fileName ??
+  (path ? String(path).split(/[\/]/).pop() : null);
+
+const lowerPath = String(path || '').toLowerCase();
+const lowerMime = String(mimeType || '').toLowerCase();
+
+let fileType = 'unknown';
+if (lowerMime === 'application/pdf' || lowerPath.endsWith('.pdf')) {
+  fileType = 'pdf';
+} else if (lowerMime.startsWith('image/') || /.(jpg|jpeg|png|webp)$/i.test(lowerPath)) {
+  fileType = 'image';
+}
+
+return [
+  {
+    json: {
+      ...source,
+      runtimeContext,
+      originalPath: path,
+      mimeType,
+      fileName,
+      fileType
+    },
+    binary: item?.binary
+  }
+];

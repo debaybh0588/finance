@@ -1,0 +1,130 @@
+      igst_amount: toOptionalNumber(normalizedFields.igst_amount, "normalized_fields.igst_amount"),
+      cess_amount: toOptionalNumber(normalizedFields.cess_amount, "normalized_fields.cess_amount"),
+      round_off_amount: toOptionalNumber(normalizedFields.round_off_amount, "normalized_fields.round_off_amount"),
+      total_amount: toOptionalNumber(normalizedFields.total_amount, "normalized_fields.total_amount"),
+      dedupe_key: toOptionalString(normalizedFields.dedupe_key),
+      source_hash: toOptionalString(normalizedFields.source_hash)
+    },
+    confidenceScore: toOptionalNumber(payload.confidence_score, "confidence_score"),
+    lowConfidenceFields: toArray(payload.low_confidence_fields, "low_confidence_fields"),
+    warnings: toArray(payload.warnings, "warnings"),
+    salvaged: Boolean(payload.salvaged),
+    extractionErrorMessage: toOptionalString(payload.error_message)
+  };
+};
+
+const resolveBusinessStatus = (extractionStatus, retryCount) => {
+  if (extractionStatus === "SUCCESS" || extractionStatus === "PARTIAL") {
+    return "PENDING_REVIEW";
+  }
+
+  return retryCount < maxExtractionRetries ? "EXTRACTING" : "FAILED";
+};
+
+const resolveStoredExtractionStatus = (extractionStatus, retryCount) => {
+  if (extractionStatus === "RETRYABLE" || extractionStatus === "FAILED") {
+    return retryCount < maxExtractionRetries ? "RETRYABLE" : "FAILED";
+  }
+
+  return extractionStatus;
+};
+
+const ensureInvoice = async (invoiceId, tenantId, client) => {
+  const invoice = await invoiceExtractionRepository.findById(invoiceId, tenantId, client);
+  if (!invoice) {
+    throw createError("Invoice not found for tenant", 404, "INVOICE_NOT_FOUND");
+  }
+  return invoice;
+};
+
+const normalizeScopeValue = (value) => {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed || null;
+};
+
+const resolveDashboardScope = (context, query = {}) => {
+  const requestedTenantId = normalizeScopeValue(query.tenantId);
+  const requestedBranchId = normalizeScopeValue(query.branchId);
+
+  if (requestedTenantId && context.role !== "SUPER_ADMIN" && requestedTenantId !== context.tenantId) {
+    throw createError("Forbidden", 403, "FORBIDDEN");
+  }
+
+  return {
+    tenantId: requestedTenantId || context.tenantId,
+    branchId: requestedBranchId !== null ? requestedBranchId : context.branchId
+  };
+};
+
+const normalizeQueryText = (value) => {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed || null;
+};
+
+const resolveListScope = (context, query = {}) => {
+  const requestedTenantId = normalizeScopeValue(query.tenantId);
+  const requestedBranchId = normalizeScopeValue(query.branchId);
+
+  if (requestedTenantId && context.role !== "SUPER_ADMIN" && requestedTenantId !== context.tenantId) {
+    throw createError("Forbidden", 403, "FORBIDDEN");
+  }
+
+  return {
+    tenantId: requestedTenantId || context.tenantId,
+    branchId: requestedBranchId !== null ? requestedBranchId : context.branchId
+  };
+};
+
+const isAbsoluteHttpUrl = (value) => /^https?:\/\//i.test(String(value || ""));
+
+const normalizeWebhookEndpoint = (value) => {
+  const raw = toOptionalString(value);
+  if (!raw) return null;
+  if (isAbsoluteHttpUrl(raw)) return raw;
+  return raw.startsWith("/") ? raw : `/${raw}`;
+};
+
+const resolveWebhookUrl = (baseUrl, endpoint) => {
+  const normalizedEndpoint = normalizeWebhookEndpoint(endpoint);
+  if (!normalizedEndpoint) return null;
+  if (isAbsoluteHttpUrl(normalizedEndpoint)) return normalizedEndpoint;
+
+  const normalizedBaseUrl = typeof baseUrl === "string" ? baseUrl.trim() : "";
+  if (!normalizedBaseUrl) return null;
+
+  return `${normalizedBaseUrl.replace(/\/+$/, "")}${normalizedEndpoint}`;
+};
+
+const normalizePostingReviewMode = (value) => {
+  const mode = toOptionalString(value);
+  const normalized = String(mode || "AUTO_POST").toUpperCase();
+  return normalized === "REVIEW_BEFORE_POSTING" ? "REVIEW_BEFORE_POSTING" : "AUTO_POST";
+};
+
+const fetchWithTimeout = async (url, options = {}, timeoutMs = 10000) => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+const resolveTallyEndpointUrl = (baseUrl, port) => {
+  const raw = toOptionalString(baseUrl);
+  if (!raw) {
+    throw createError("tallyBaseUrl is missing", 422, "TALLY_CONFIG_INVALID");
+  }
+
+  const normalized = /^https?:\/\//i.test(raw) ? raw : `http://${raw}`;
+  const url = new URL(normalized);
+  if (Number.isInteger(port) && port > 0 && !url.port) {
+    url.port = String(port);
+  }
+  return url.toString();
+};
+
