@@ -26,7 +26,7 @@ const extractionClassMap = {
 };
 
 function InvoicesPage() {
-  const { selectedTenantId, selectedBranchId, selectedDateRange, setDateRangeScope, tenants } = useAuth();
+  const { selectedTenantId, selectedBranchId, selectedDateRange, tenants } = useAuth();
   const navigate = useNavigate();
   const [invoiceData, setInvoiceData] = useState(null);
   const [viewState, setViewState] = useState("loading");
@@ -188,16 +188,6 @@ function InvoicesPage() {
               <option value="REJECTED">REJECTED</option>
             </select>
 
-            <select
-              value={selectedDateRange}
-              aria-label="Date range filter"
-              onChange={(event) => setDateRangeScope(event.target.value)}
-            >
-              <option value="today">Today</option>
-              <option value="this-week">This Week</option>
-              <option value="this-month">This Month</option>
-              <option value="this-quarter">This Quarter</option>
-            </select>
           </div>
 
           <article className="card invoices-table-card">

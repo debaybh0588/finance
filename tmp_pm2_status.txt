@@ -1,0 +1,9 @@
+┌────┬─────────────────────┬─────────────┬─────────┬─────────┬──────────┬────────┬──────┬───────────┬──────────┬──────────┬──────────┬──────────┐
+│ id │ name                │ namespace   │ version │ mode    │ pid      │ uptime │ ↺    │ status    │ cpu      │ mem      │ user     │ watching │
+├────┼─────────────────────┼─────────────┼─────────┼─────────┼──────────┼────────┼──────┼───────────┼──────────┼──────────┼──────────┼──────────┤
+│ 1  │ coachease-api       │ default     │ N/A     │ fork    │ 1059     │ 12D    │ 0    │ online    │ 0%       │ 115.7mb  │ root     │ disabled │
+│ 0  │ helperAI-backend    │ default     │ 0.1.0   │ fork    │ N/A      │ 0      │ 325  │ stopped   │ 0%       │ 0b       │ root     │ disabled │
+│ 15 │ invoice-backend     │ default     │ 0.1.0   │ fork    │ 252957   │ 0s     │ 1    │ online    │ 100%     │ 59.3mb   │ root     │ disabled │
+│ 21 │ invoice-frontend    │ default     │ N/A     │ fork    │ 153737   │ 6D     │ 0    │ online    │ 0%       │ 76.7mb   │ root     │ disabled │
+│ 14 │ n8n                 │ default     │ N/A     │ fork    │ 70436    │ 12D    │ 0    │ online    │ 0%       │ 363.8mb  │ root     │ disabled │
+└────┴─────────────────────┴─────────────┴─────────┴─────────┴──────────┴────────┴──────┴───────────┴──────────┴──────────┴──────────┴──────────┘

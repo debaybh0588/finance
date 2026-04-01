@@ -2,7 +2,7 @@ import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import { authService } from "../api/authService.js";
 
 const AUTH_STORAGE_KEY = "accounting_ai_auth";
-const DEFAULT_DATE_RANGE = "this-month";
+const DEFAULT_DATE_RANGE = "all-time";
 
 const AuthContext = createContext(null);
 

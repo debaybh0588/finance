@@ -1,0 +1,91 @@
+{
+  "clock": [
+    {
+      "now_ts": "2026-03-31T17:17:36.208Z",
+      "db_date": "2026-03-31T00:00:00.000Z",
+      "tz": "Etc/UTC"
+    }
+  ],
+  "latest": [
+    {
+      "id": "1d9cb87f-dc0a-4e37-9768-978abb87fdfb",
+      "tenant_id": "a30cf16c-61d3-4172-bc10-328ce7b9b2bb",
+      "branch_id": "0cfe0e53-7bbd-406e-bca7-c6e18d1d268e",
+      "business_status": "PENDING_REVIEW",
+      "created_at": "2026-03-31T17:15:53.274Z",
+      "invoice_date": "2026-02-01T00:00:00.000Z"
+    },
+    {
+      "id": "76b342db-3bae-4b01-b473-3dc6cf85ab54",
+      "tenant_id": "a30cf16c-61d3-4172-bc10-328ce7b9b2bb",
+      "branch_id": "0cfe0e53-7bbd-406e-bca7-c6e18d1d268e",
+      "business_status": "PENDING_REVIEW",
+      "created_at": "2026-03-31T16:43:28.484Z",
+      "invoice_date": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "29324ebe-89cc-4df1-aba1-838c4ae4c2f9",
+      "tenant_id": "a30cf16c-61d3-4172-bc10-328ce7b9b2bb",
+      "branch_id": "0cfe0e53-7bbd-406e-bca7-c6e18d1d268e",
+      "business_status": "PENDING_REVIEW",
+      "created_at": "2026-03-31T16:37:36.343Z",
+      "invoice_date": "2026-11-01T00:00:00.000Z"
+    },
+    {
+      "id": "b5d4c2c7-77d6-4ce8-a9b3-e9e58f111a24",
+      "tenant_id": "a30cf16c-61d3-4172-bc10-328ce7b9b2bb",
+      "branch_id": "0cfe0e53-7bbd-406e-bca7-c6e18d1d268e",
+      "business_status": "PENDING_REVIEW",
+      "created_at": "2026-03-31T16:37:36.331Z",
+      "invoice_date": "2026-04-02T00:00:00.000Z"
+    },
+    {
+      "id": "a0a8fb11-2e65-4cbf-9aff-15af7f1693d6",
+      "tenant_id": "a30cf16c-61d3-4172-bc10-328ce7b9b2bb",
+      "branch_id": "0cfe0e53-7bbd-406e-bca7-c6e18d1d268e",
+      "business_status": "PENDING_REVIEW",
+      "created_at": "2026-03-31T16:34:44.475Z",
+      "invoice_date": "2026-02-01T00:00:00.000Z"
+    },
+    {
+      "id": "9f37059c-84fb-4912-b505-fd282cbae25a",
+      "tenant_id": "a30cf16c-61d3-4172-bc10-328ce7b9b2bb",
+      "branch_id": "0cfe0e53-7bbd-406e-bca7-c6e18d1d268e",
+      "business_status": "PENDING_REVIEW",
+      "created_at": "2026-03-31T16:34:44.465Z",
+      "invoice_date": "2026-01-02T00:00:00.000Z"
+    },
+    {
+      "id": "aa7290e1-fb11-4f15-b02a-79b8e0b0f6bd",
+      "tenant_id": "a30cf16c-61d3-4172-bc10-328ce7b9b2bb",
+      "branch_id": "0cfe0e53-7bbd-406e-bca7-c6e18d1d268e",
+      "business_status": "POSTED",
+      "created_at": "2026-03-25T18:17:04.202Z",
+      "invoice_date": "2026-04-01T00:00:00.000Z"
+    },
+    {
+      "id": "60c38fb7-b7ab-4b49-9b95-1cb612b424f7",
+      "tenant_id": "a30cf16c-61d3-4172-bc10-328ce7b9b2bb",
+      "branch_id": "0cfe0e53-7bbd-406e-bca7-c6e18d1d268e",
+      "business_status": "POSTED",
+      "created_at": "2026-03-25T18:17:04.200Z",
+      "invoice_date": "2026-09-01T00:00:00.000Z"
+    },
+    {
+      "id": "93ac0d70-daa0-4e23-90c0-7792d9f91c31",
+      "tenant_id": "a30cf16c-61d3-4172-bc10-328ce7b9b2bb",
+      "branch_id": "0cfe0e53-7bbd-406e-bca7-c6e18d1d268e",
+      "business_status": "POSTED",
+      "created_at": "2026-03-25T18:17:04.198Z",
+      "invoice_date": "2026-06-02T00:00:00.000Z"
+    },
+    {
+      "id": "332084fe-0f2b-46e3-bb8f-f24c8ab6366c",
+      "tenant_id": "a30cf16c-61d3-4172-bc10-328ce7b9b2bb",
+      "branch_id": "0cfe0e53-7bbd-406e-bca7-c6e18d1d268e",
+      "business_status": "POSTED",
+      "created_at": "2026-03-25T18:17:04.197Z",
+      "invoice_date": "2026-07-02T00:00:00.000Z"
+    }
+  ]
+}

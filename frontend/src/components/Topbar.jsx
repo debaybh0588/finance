@@ -78,10 +78,11 @@ function Topbar() {
           </select>
 
           <select
-            value={selectedDateRange || "this-month"}
+            value={selectedDateRange || "all-time"}
             aria-label="Date range"
             onChange={(event) => setDateRangeScope(event.target.value)}
           >
+            <option value="all-time">All time</option>
             <option value="today">Today</option>
             <option value="this-week">This week</option>
             <option value="this-month">This month</option>

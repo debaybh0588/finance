@@ -5,7 +5,7 @@ export const invoiceService = {
     const params = new URLSearchParams();
     if (tenantId) params.set("tenantId", tenantId);
     if (branchId) params.set("branchId", branchId);
-    if (dateRange) params.set("dateRange", dateRange);
+    if (dateRange && dateRange !== "all-time") params.set("dateRange", dateRange);
     const query = params.toString();
     return get(`/dashboard/summary${query ? `?${query}` : ""}`);
   },
@@ -17,7 +17,7 @@ export const invoiceService = {
     if (params.search) searchParams.set("search", params.search);
     if (params.invoiceType) searchParams.set("invoiceType", params.invoiceType);
     if (params.status) searchParams.set("status", params.status);
-    if (params.dateRange) searchParams.set("dateRange", params.dateRange);
+    if (params.dateRange && params.dateRange !== "all-time") searchParams.set("dateRange", params.dateRange);
     if (params.duplicateFlag) searchParams.set("duplicateFlag", params.duplicateFlag);
     if (params.extractionStatus) searchParams.set("extractionStatus", params.extractionStatus);
     const query = searchParams.toString();
@@ -25,12 +25,10 @@ export const invoiceService = {
   },
 
   getReviewQueue(params = {}) {
-    return this.listInvoices({
-      tenantId: params.tenantId,
-      branchId: params.branchId,
-      dateRange: params.dateRange,
-      status: "PENDING_REVIEW"
-    });
+    const searchParams = new URLSearchParams();
+    if (params.dateRange && params.dateRange !== "all-time") searchParams.set("dateRange", params.dateRange);
+    const query = searchParams.toString();
+    return get(`/review/queue${query ? `?${query}` : ""}`);
   },
 
   getReviewDetail(invoiceId) {
@@ -65,7 +63,7 @@ export const invoiceService = {
     const params = new URLSearchParams();
     if (tenantId) params.set("tenantId", tenantId);
     if (branchId) params.set("branchId", branchId);
-    if (dateRange) params.set("dateRange", dateRange);
+    if (dateRange && dateRange !== "all-time") params.set("dateRange", dateRange);
     const query = params.toString();
     return get(`/posting/summary${query ? `?${query}` : ""}`);
   },
@@ -74,7 +72,7 @@ export const invoiceService = {
     const params = new URLSearchParams();
     if (tenantId) params.set("tenantId", tenantId);
     if (branchId) params.set("branchId", branchId);
-    if (dateRange) params.set("dateRange", dateRange);
+    if (dateRange && dateRange !== "all-time") params.set("dateRange", dateRange);
     const query = params.toString();
     return get(`/posting/review${query ? `?${query}` : ""}`);
   },

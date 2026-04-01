@@ -120,6 +120,7 @@ function DashboardPage() {
           aria-label="Date range filter"
           onChange={(event) => setDateRangeScope(event.target.value)}
         >
+          <option value="all-time">All Time</option>
           <option value="today">Today</option>
           <option value="this-week">This Week</option>
           <option value="this-month">This Month</option>

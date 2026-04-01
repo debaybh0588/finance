@@ -83,7 +83,8 @@ const getDashboardSeriesWindowSql = (dateRange) => {
 export const invoiceReadRepository = {
   async getDashboardRows(tenantId, branchId, dateRange = null) {
     const params = branchId ? [tenantId, branchId] : [tenantId];
-    const invoiceDateExpr = "COALESCE(i.invoice_date, i.created_at::date)";
+    // Dashboard date filters should follow workflow ingestion date, not supplier invoice date.
+    const invoiceDateExpr = "i.created_at::date";
     const dateFilter = dateRangeFilterSql(dateRange, invoiceDateExpr);
     const partyDateFilter =
       dateFilter || ` AND date_trunc('month', ${invoiceDateExpr}) = date_trunc('month', current_date)`;
@@ -202,7 +203,8 @@ export const invoiceReadRepository = {
       whereParts.push(`i.extraction_status = $${params.length}`);
     }
 
-    const invoiceDateRangeCondition = dateRangeConditionSql(filters.dateRange, "COALESCE(i.invoice_date, i.created_at::date)");
+    // Invoices page date filters should map to upload/ingestion timeline.
+    const invoiceDateRangeCondition = dateRangeConditionSql(filters.dateRange, "i.created_at::date");
     if (invoiceDateRangeCondition) {
       whereParts.push(invoiceDateRangeCondition);
     }
@@ -460,7 +462,8 @@ export const invoiceReadRepository = {
 
   async listReviewQueue(tenantId, branchId, dateRange = null) {
     const params = branchId ? [tenantId, branchId] : [tenantId];
-    const reviewDateFilter = dateRangeFilterSql(dateRange, "COALESCE(i.invoice_date, i.created_at::date)");
+    // Review queue follows workflow queue date (created_at), not the source document invoice date.
+    const reviewDateFilter = dateRangeFilterSql(dateRange, "i.created_at::date");
     const result = await query(
       `SELECT
           i.id,
