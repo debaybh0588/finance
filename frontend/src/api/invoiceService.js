@@ -81,6 +81,18 @@ export const invoiceService = {
     return get(`/posting/review/${invoiceId}`);
   },
 
+  getPostingReviewMapping(invoiceId) {
+    return get(`/posting/review/${invoiceId}/mapping`);
+  },
+
+  refreshPostingReviewMapping(invoiceId) {
+    return post(`/posting/review/${invoiceId}/mapping/refresh`, {});
+  },
+
+  savePostingReviewMapping(invoiceId, payload) {
+    return post(`/posting/review/${invoiceId}/mapping`, payload);
+  },
+
   approvePostingReview(invoiceId, payload) {
     return post(`/posting/review/${invoiceId}/approve`, payload);
   },

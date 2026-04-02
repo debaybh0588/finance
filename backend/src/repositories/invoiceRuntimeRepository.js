@@ -213,6 +213,8 @@ export const invoiceRuntimeRepository = {
           party_name         AS "partyName",
           party_gstin        AS "partyGstin",
           total_amount       AS "totalAmount",
+          file_name          AS "fileName",
+          mime_type          AS "mimeType",
           original_file_path AS "originalFilePath",
           created_at         AS "createdAt",
           updated_at         AS "updatedAt"

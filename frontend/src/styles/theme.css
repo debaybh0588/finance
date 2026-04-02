@@ -2750,3 +2750,72 @@ ul {
   min-height: 320px;
   height: min(58vh, 620px);
 }
+
+.posting-mapping-header p {
+  margin: 0.2rem 0;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
+.posting-mapping-meta {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+.posting-mapping-actions {
+  margin-top: 0.75rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.posting-mapping-empty {
+  margin-top: 0.8rem;
+  font-size: 0.84rem;
+  color: var(--text-muted);
+}
+
+.posting-mapping-table-wrap {
+  margin-top: 0.8rem;
+  overflow-x: auto;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  background: var(--card-bg);
+}
+
+.posting-mapping-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 760px;
+}
+
+.posting-mapping-table thead th {
+  text-align: left;
+  font-size: 0.74rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border-soft);
+  padding: 0.58rem 0.62rem;
+}
+
+.posting-mapping-table tbody td {
+  border-bottom: 1px solid rgba(216, 222, 232, 0.75);
+  padding: 0.58rem 0.62rem;
+  font-size: 0.83rem;
+  vertical-align: top;
+}
+
+.posting-mapping-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.posting-mapping-table select {
+  width: 100%;
+  min-width: 220px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: #fff;
+  padding: 0.4rem 0.5rem;
+  font-size: 0.82rem;
+  color: var(--text-dark);
+}

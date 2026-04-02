@@ -1,6 +1,7 @@
 import { invoiceReadRepository } from "../repositories/invoiceReadRepository.js";
 import { invoicePostingRepository } from "../repositories/invoicePostingRepository.js";
 import { superAdminTenantRepository } from "../repositories/superAdminTenantRepository.js";
+import { tallyRuntimeService } from "./tallyRuntimeService.js";
 
 const toDate = (value) => {
   if (!value) return "-";
@@ -53,6 +54,118 @@ const createError = (message, statusCode, code) => {
   error.statusCode = statusCode;
   error.code = code;
   return error;
+};
+
+const decodeXmlEntities = (value) =>
+  String(value || "")
+    .replace(/&apos;/gi, "'")
+    .replace(/&quot;/gi, "\"")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&amp;/gi, "&")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const extractTallyResponseTextReason = (value) => {
+  const text = String(value || "");
+  if (!text) return null;
+
+  const directResponseReason = text.match(/<RESPONSE>\s*([^<][\s\S]*?)\s*<\/RESPONSE>/i)?.[1];
+  if (directResponseReason) {
+    const normalized = decodeXmlEntities(directResponseReason);
+    if (normalized) return normalized;
+  }
+
+  if (/Unknown Request,\s*cannot be processed/i.test(text)) {
+    return "Unknown Request, cannot be processed";
+  }
+
+  return null;
+};
+
+const uniqueNonEmptyStrings = (values = []) => {
+  const seen = new Set();
+  const output = [];
+  for (const value of values) {
+    const text = decodeXmlEntities(value);
+    if (!text) continue;
+    const key = text.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    output.push(text);
+  }
+  return output;
+};
+
+const isGenericPostingFailureMessage = (value) => {
+  const text = normalizeScopeValue(value);
+  if (!text) return true;
+  return /^(posting failed|tally posting failed|tally response indicates posting failure)$/i.test(text);
+};
+
+const buildSilentTallyFailureReason = (summary = {}) => {
+  const created = Number(summary?.created ?? 0) || 0;
+  const altered = Number(summary?.altered ?? 0) || 0;
+  const errors = Number(summary?.errors ?? 0) || 0;
+  const exceptions = Number(summary?.exceptions ?? 0) || 0;
+
+  if (exceptions > 0) {
+    return `Tally returned EXCEPTIONS=${exceptions} with no LINEERROR details (CREATED=${created}, ALTERED=${altered}, ERRORS=${errors}).`;
+  }
+  if (errors > 0) {
+    return `Tally returned ERRORS=${errors} with no LINEERROR details (CREATED=${created}, ALTERED=${altered}, EXCEPTIONS=${exceptions}).`;
+  }
+  if (created <= 0 && altered <= 0) {
+    return "Tally did not create or alter any voucher.";
+  }
+  return null;
+};
+
+const resolvePostingFailureReasonForUi = (row = {}) => {
+  const rawMessage = normalizeScopeValue(row.lastFailureReason) || null;
+  if (rawMessage && !isGenericPostingFailureMessage(rawMessage)) {
+    return rawMessage;
+  }
+
+  const metadata = row.tallyResponseMetadata && typeof row.tallyResponseMetadata === "object"
+    ? row.tallyResponseMetadata
+    : {};
+  const reasons = [];
+
+  if (Array.isArray(metadata.reviewReasons)) {
+    reasons.push(...metadata.reviewReasons);
+  }
+  if (metadata.payload && typeof metadata.payload === "object" && Array.isArray(metadata.payload.reviewReasons)) {
+    reasons.push(...metadata.payload.reviewReasons);
+  }
+
+  const masterImportSummary =
+    (metadata.masterImportSummary && typeof metadata.masterImportSummary === "object" ? metadata.masterImportSummary : null) ||
+    (metadata.payload?.masterImportSummary && typeof metadata.payload.masterImportSummary === "object"
+      ? metadata.payload.masterImportSummary
+      : null);
+
+  if (Array.isArray(masterImportSummary?.ignoredLineErrors)) {
+    for (const warning of masterImportSummary.ignoredLineErrors) {
+      reasons.push(`Master import warning: ${warning}`);
+    }
+  }
+
+  reasons.push(
+    extractTallyResponseTextReason(metadata.responsePreview),
+    extractTallyResponseTextReason(metadata.payload?.responsePreview)
+  );
+
+  const summary =
+    (metadata.summary && typeof metadata.summary === "object" ? metadata.summary : null) ||
+    (metadata.payload?.summary && typeof metadata.payload.summary === "object" ? metadata.payload.summary : null);
+  const silentReason = buildSilentTallyFailureReason(summary);
+  if (silentReason) {
+    reasons.push(silentReason);
+  }
+
+  const resolvedReasons = uniqueNonEmptyStrings(reasons);
+  return resolvedReasons[0] || rawMessage || "Posting failed";
 };
 
 const requireInvoiceId = (invoiceId) => {
@@ -193,27 +306,31 @@ export const postingService = {
 
     return {
       tabs: ["Review Required", "Submitted", "Completed", "Failed"],
-      items: rows.map((row) => ({
-        id: row.id,
-        status: toUiStatus(row.status),
-        postingStatus: row.status,
-        tallyPostingStatus: row.tallyPostingStatus,
-        invoiceType: toUiInvoiceType(row.documentType),
-        documentType: row.documentType,
-        partyName: row.partyName,
-        branch: row.branch,
-        date: toDate(row.date),
-        amount: Number(row.amount || 0),
-        approvedBy: row.approvedBy,
-        postingDraftGeneratedAt: row.postingDraftGeneratedAt,
-        postingDraftReviewedAt: row.postingDraftReviewedAt,
-        postingDraftReviewedBy: row.postingDraftReviewedBy,
-        postedBy: row.postedBy,
-        voucherType: row.voucherType,
-        voucherNumber: row.voucherNumber,
-        responseSummary: row.responseSummary,
-        lastFailureReason: row.lastFailureReason || null
-      })),
+      items: rows.map((row) => {
+        const resolvedFailureReason = resolvePostingFailureReasonForUi(row);
+        return {
+          id: row.id,
+          status: toUiStatus(row.status),
+          postingStatus: row.status,
+          tallyPostingStatus: row.tallyPostingStatus,
+          invoiceType: toUiInvoiceType(row.documentType),
+          documentType: row.documentType,
+          partyName: row.partyName,
+          branch: row.branch,
+          date: toDate(row.date),
+          amount: Number(row.amount || 0),
+          approvedBy: row.approvedBy,
+          postingDraftGeneratedAt: row.postingDraftGeneratedAt,
+          postingDraftReviewedAt: row.postingDraftReviewedAt,
+          postingDraftReviewedBy: row.postingDraftReviewedBy,
+          postedBy: row.postedBy,
+          voucherType: row.voucherType,
+          voucherNumber: row.voucherNumber,
+          responseSummary: resolvedFailureReason,
+          lastFailureReason: resolvedFailureReason || null,
+          tallyResponseMetadata: row.tallyResponseMetadata || null
+        };
+      }),
       summary: await invoiceReadRepository.postingSummary(scope.tenantId, scope.branchId, scope.dateRange),
       meta: {
         tenantId: scope.tenantId,
@@ -264,6 +381,61 @@ export const postingService = {
     return {
       ...invoice,
       postingReviewClosed: invoice.status !== "PENDING_POSTING_REVIEW"
+    };
+  },
+
+  async getPostingReviewMapping(invoiceId, context, options = {}) {
+    const normalizedId = requireInvoiceId(invoiceId);
+    const invoice = await invoiceReadRepository.getInvoiceDetail(normalizedId, context.tenantId);
+
+    if (!invoice) {
+      throw createError("Invoice not found for tenant", 404, "INVOICE_NOT_FOUND");
+    }
+
+    const forceRefresh = Boolean(options.forceRefresh);
+
+    const mapping = await tallyRuntimeService.getPostingMappingContext({
+      tenantId: context.tenantId,
+      invoice,
+      forceRefresh
+    });
+
+    return {
+      invoiceId: normalizedId,
+      mapping
+    };
+  },
+
+  async savePostingReviewMapping(invoiceId, context, payload = {}) {
+    const normalizedId = requireInvoiceId(invoiceId);
+    const invoice = await invoiceReadRepository.getInvoiceDetail(normalizedId, context.tenantId);
+
+    if (!invoice) {
+      throw createError("Invoice not found for tenant", 404, "INVOICE_NOT_FOUND");
+    }
+
+    const mappings = Array.isArray(payload.mappings) ? payload.mappings : [];
+    const updatedBy =
+      toOptionalString(payload.updated_by || payload.reviewed_by || payload.user_name) ||
+      context.userId ||
+      "Posting Reviewer";
+
+    await tallyRuntimeService.savePostingFieldMappings({
+      tenantId: context.tenantId,
+      documentType: invoice.documentType,
+      mappings,
+      updatedBy
+    });
+
+    const mapping = await tallyRuntimeService.getPostingMappingContext({
+      tenantId: context.tenantId,
+      invoice,
+      forceRefresh: false
+    });
+
+    return {
+      invoiceId: normalizedId,
+      mapping
     };
   },
 

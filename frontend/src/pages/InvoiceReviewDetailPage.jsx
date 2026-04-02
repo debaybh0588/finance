@@ -4,7 +4,7 @@ import { invoiceService } from "../api/invoiceService.js";
 import { useAuth } from "../auth/AuthContext.jsx";
 import PageState from "../components/PageState.jsx";
 
-const LOW_CONFIDENCE_THRESHOLD = 0.8;
+const LOW_CONFIDENCE_THRESHOLD = 0.88;
 const CALC_MISMATCH_EPSILON = 1;
 
 const FIELD_ALIASES = {
@@ -101,7 +101,11 @@ const pickByAliases = (source, aliases) => {
 const normalizeLineItem = (row, index) => {
   if (!row || typeof row !== "object") return null;
   const taxableAmount = toNumber(row.taxableAmount ?? row.taxable_amount ?? row.amount ?? row.value);
-  const tax = toNumber(row.tax ?? row.tax_amount ?? row.gst) ?? 0;
+  const cgst = toNumber(row.cgst ?? row.cgst_amount);
+  const sgst = toNumber(row.sgst ?? row.sgst_amount);
+  const igst = toNumber(row.igst ?? row.igst_amount);
+  const derivedTax = [cgst, sgst, igst].reduce((sum, value) => sum + (value ?? 0), 0);
+  const tax = toNumber(row.tax ?? row.tax_amount ?? row.gst) ?? derivedTax;
   const total = toNumber(row.total ?? row.total_amount ?? row.line_total) ?? (taxableAmount === null ? null : taxableAmount + tax);
 
   const item = {
@@ -112,6 +116,9 @@ const normalizeLineItem = (row, index) => {
     uom: row.uom ?? row.unit ?? row.uqc ?? "-",
     rate: toNumber(row.rate ?? row.unit_rate ?? row.unitPrice),
     taxableAmount,
+    cgst,
+    sgst,
+    igst,
     tax,
     total
   };
@@ -141,7 +148,18 @@ const extractLineItemsFallback = (extractedJson) => {
   const normalized = rows.map((row, index) => normalizeLineItem(row, index)).filter(Boolean);
   const seen = new Set();
   return normalized.filter((item) => {
-    const signature = JSON.stringify([item.description, item.hsn, item.quantity, item.rate, item.taxableAmount, item.tax, item.total]);
+    const signature = JSON.stringify([
+      item.description,
+      item.hsn,
+      item.quantity,
+      item.rate,
+      item.taxableAmount,
+      item.cgst,
+      item.sgst,
+      item.igst,
+      item.tax,
+      item.total
+    ]);
     if (seen.has(signature)) return false;
     seen.add(signature);
     return true;
@@ -159,6 +177,9 @@ const toEditableLineItem = (item, index = 0) => ({
   uom: item?.uom && item.uom !== "-" ? String(item.uom) : "",
   rate: item?.rate === null || item?.rate === undefined ? "" : String(item.rate),
   taxableAmount: item?.taxableAmount === null || item?.taxableAmount === undefined ? "" : String(item.taxableAmount),
+  cgst: item?.cgst === null || item?.cgst === undefined ? "" : String(item.cgst),
+  sgst: item?.sgst === null || item?.sgst === undefined ? "" : String(item.sgst),
+  igst: item?.igst === null || item?.igst === undefined ? "" : String(item.igst),
   tax: item?.tax === null || item?.tax === undefined ? "" : String(item.tax),
   total: item?.total === null || item?.total === undefined ? "" : String(item.total)
 });
@@ -288,6 +309,9 @@ function InvoiceReviewDetailPage() {
           const uom = String(row.uom || "").trim();
           const rate = toNumber(row.rate);
           const taxableAmount = toNumber(row.taxableAmount);
+          const cgst = toNumber(row.cgst);
+          const sgst = toNumber(row.sgst);
+          const igst = toNumber(row.igst);
           const tax = toNumber(row.tax);
           const total = toNumber(row.total);
 
@@ -297,6 +321,9 @@ function InvoiceReviewDetailPage() {
             quantity !== null ||
             rate !== null ||
             taxableAmount !== null ||
+            cgst !== null ||
+            sgst !== null ||
+            igst !== null ||
             tax !== null ||
             total !== null;
 
@@ -310,6 +337,9 @@ function InvoiceReviewDetailPage() {
             uom: uom || null,
             rate,
             taxable_amount: taxableAmount,
+            cgst,
+            sgst,
+            igst,
             tax,
             total_amount: total
           };
@@ -367,6 +397,56 @@ function InvoiceReviewDetailPage() {
       extractedText: extractedValue === null || extractedValue === undefined || extractedValue === "" ? "-" : typeof extractedValue === "object" ? JSON.stringify(extractedValue) : String(extractedValue),
       confidenceLabel: confidence === null ? (isLow ? "Low confidence" : null) : `${Math.round(confidence * 100)}% confidence`,
       isLow
+    };
+  };
+
+  const lineFieldMeta = (index, fieldKey) => {
+    const candidates = [
+      `line_items[${index}].${fieldKey}`,
+      `lineitems[${index}].${fieldKey}`,
+      `line_items.${index}.${fieldKey}`,
+      `lineitems.${index}.${fieldKey}`,
+      `line_item_${index}_${fieldKey}`
+    ];
+
+    let confidence = null;
+    for (const candidate of candidates) {
+      const normalized = normalizeKey(candidate);
+      if (fieldConfidenceMap.has(normalized)) {
+        confidence = fieldConfidenceMap.get(normalized);
+        break;
+      }
+    }
+
+    if (fieldKey === "tax" && confidence === null) {
+      const taxParts = ["cgst", "sgst", "igst"].map((key) => {
+        const taxCandidates = [
+          `line_items[${index}].${key}`,
+          `lineitems[${index}].${key}`,
+          `line_items.${index}.${key}`,
+          `lineitems.${index}.${key}`,
+          `line_item_${index}_${key}`
+        ];
+        for (const candidate of taxCandidates) {
+          const normalized = normalizeKey(candidate);
+          if (fieldConfidenceMap.has(normalized)) return fieldConfidenceMap.get(normalized);
+        }
+        return null;
+      }).filter((value) => value !== null);
+
+      if (taxParts.length > 0) {
+        const sum = taxParts.reduce((acc, value) => acc + value, 0);
+        confidence = sum / taxParts.length;
+      }
+    }
+
+    const isLow =
+      candidates.some((candidate) => lowConfidenceSet.has(normalizeKey(candidate))) ||
+      (confidence !== null && confidence < LOW_CONFIDENCE_THRESHOLD);
+
+    return {
+      isLow,
+      confidenceLabel: confidence === null ? (isLow ? "Low confidence" : null) : `${Math.round(confidence * 100)}% confidence`
     };
   };
 
@@ -778,6 +858,9 @@ function InvoiceReviewDetailPage() {
                     <th>UOM</th>
                     <th>Rate</th>
                     <th>Taxable Amount</th>
+                    <th>CGST</th>
+                    <th>SGST</th>
+                    <th>IGST</th>
                     <th>Tax</th>
                     <th>Total</th>
                     <th>Action</th>
@@ -785,96 +868,222 @@ function InvoiceReviewDetailPage() {
                 </thead>
                 <tbody>
                   {editableLineItems.length === 0 ? (
-                    <tr><td colSpan={10}>No line items available</td></tr>
+                    <tr><td colSpan={13}>No line items available</td></tr>
                   ) : (
                     editableLineItems.map((item, index) => (
                       <tr key={item.id}>
                         <td>
+                          {(() => {
+                            const meta = lineFieldMeta(index, "line_no");
+                            return (
+                              <>
                           <input
                             type="number"
                             min="1"
-                            className="detail-line-input"
+                            className={`detail-line-input${meta.isLow ? " low-confidence-input" : ""}`}
                             value={item.lineNo}
                             onChange={updateLineItemField(item.id, "lineNo")}
                             disabled={actionInProgress}
                           />
+                                {meta.confidenceLabel ? <span className={`field-confidence-tag${meta.isLow ? " low" : ""}`}>{meta.confidenceLabel}</span> : null}
+                              </>
+                            );
+                          })()}
                         </td>
                         <td>
+                          {(() => {
+                            const meta = lineFieldMeta(index, "description");
+                            return (
+                              <>
                           <input
                             type="text"
-                            className="detail-line-input"
+                            className={`detail-line-input${meta.isLow ? " low-confidence-input" : ""}`}
                             value={item.description}
                             onChange={updateLineItemField(item.id, "description")}
                             disabled={actionInProgress}
                           />
+                                {meta.confidenceLabel ? <span className={`field-confidence-tag${meta.isLow ? " low" : ""}`}>{meta.confidenceLabel}</span> : null}
+                              </>
+                            );
+                          })()}
                         </td>
                         <td>
+                          {(() => {
+                            const meta = lineFieldMeta(index, "hsn");
+                            return (
+                              <>
                           <input
                             type="text"
-                            className="detail-line-input"
+                            className={`detail-line-input${meta.isLow ? " low-confidence-input" : ""}`}
                             value={item.hsn}
                             onChange={updateLineItemField(item.id, "hsn")}
                             disabled={actionInProgress}
                           />
+                                {meta.confidenceLabel ? <span className={`field-confidence-tag${meta.isLow ? " low" : ""}`}>{meta.confidenceLabel}</span> : null}
+                              </>
+                            );
+                          })()}
                         </td>
                         <td>
+                          {(() => {
+                            const meta = lineFieldMeta(index, "quantity");
+                            return (
+                              <>
                           <input
                             type="number"
                             step="any"
-                            className="detail-line-input"
+                            className={`detail-line-input${meta.isLow ? " low-confidence-input" : ""}`}
                             value={item.quantity}
                             onChange={updateLineItemField(item.id, "quantity")}
                             disabled={actionInProgress}
                           />
+                                {meta.confidenceLabel ? <span className={`field-confidence-tag${meta.isLow ? " low" : ""}`}>{meta.confidenceLabel}</span> : null}
+                              </>
+                            );
+                          })()}
                         </td>
                         <td>
+                          {(() => {
+                            const meta = lineFieldMeta(index, "uom");
+                            return (
+                              <>
                           <input
                             type="text"
-                            className="detail-line-input"
+                            className={`detail-line-input${meta.isLow ? " low-confidence-input" : ""}`}
                             value={item.uom}
                             onChange={updateLineItemField(item.id, "uom")}
                             disabled={actionInProgress}
                           />
+                                {meta.confidenceLabel ? <span className={`field-confidence-tag${meta.isLow ? " low" : ""}`}>{meta.confidenceLabel}</span> : null}
+                              </>
+                            );
+                          })()}
                         </td>
                         <td>
+                          {(() => {
+                            const meta = lineFieldMeta(index, "rate");
+                            return (
+                              <>
                           <input
                             type="number"
                             step="any"
-                            className="detail-line-input"
+                            className={`detail-line-input${meta.isLow ? " low-confidence-input" : ""}`}
                             value={item.rate}
                             onChange={updateLineItemField(item.id, "rate")}
                             disabled={actionInProgress}
                           />
+                                {meta.confidenceLabel ? <span className={`field-confidence-tag${meta.isLow ? " low" : ""}`}>{meta.confidenceLabel}</span> : null}
+                              </>
+                            );
+                          })()}
                         </td>
                         <td>
+                          {(() => {
+                            const meta = lineFieldMeta(index, "taxable_amount");
+                            return (
+                              <>
                           <input
                             type="number"
                             step="any"
-                            className="detail-line-input"
+                            className={`detail-line-input${meta.isLow ? " low-confidence-input" : ""}`}
                             value={item.taxableAmount}
                             onChange={updateLineItemField(item.id, "taxableAmount")}
                             disabled={actionInProgress}
                           />
+                                {meta.confidenceLabel ? <span className={`field-confidence-tag${meta.isLow ? " low" : ""}`}>{meta.confidenceLabel}</span> : null}
+                              </>
+                            );
+                          })()}
                         </td>
                         <td>
+                          {(() => {
+                            const meta = lineFieldMeta(index, "cgst");
+                            return (
+                              <>
                           <input
                             type="number"
                             step="any"
-                            className="detail-line-input"
+                            className={`detail-line-input${meta.isLow ? " low-confidence-input" : ""}`}
+                            value={item.cgst}
+                            onChange={updateLineItemField(item.id, "cgst")}
+                            disabled={actionInProgress}
+                          />
+                                {meta.confidenceLabel ? <span className={`field-confidence-tag${meta.isLow ? " low" : ""}`}>{meta.confidenceLabel}</span> : null}
+                              </>
+                            );
+                          })()}
+                        </td>
+                        <td>
+                          {(() => {
+                            const meta = lineFieldMeta(index, "sgst");
+                            return (
+                              <>
+                          <input
+                            type="number"
+                            step="any"
+                            className={`detail-line-input${meta.isLow ? " low-confidence-input" : ""}`}
+                            value={item.sgst}
+                            onChange={updateLineItemField(item.id, "sgst")}
+                            disabled={actionInProgress}
+                          />
+                                {meta.confidenceLabel ? <span className={`field-confidence-tag${meta.isLow ? " low" : ""}`}>{meta.confidenceLabel}</span> : null}
+                              </>
+                            );
+                          })()}
+                        </td>
+                        <td>
+                          {(() => {
+                            const meta = lineFieldMeta(index, "igst");
+                            return (
+                              <>
+                          <input
+                            type="number"
+                            step="any"
+                            className={`detail-line-input${meta.isLow ? " low-confidence-input" : ""}`}
+                            value={item.igst}
+                            onChange={updateLineItemField(item.id, "igst")}
+                            disabled={actionInProgress}
+                          />
+                                {meta.confidenceLabel ? <span className={`field-confidence-tag${meta.isLow ? " low" : ""}`}>{meta.confidenceLabel}</span> : null}
+                              </>
+                            );
+                          })()}
+                        </td>
+                        <td>
+                          {(() => {
+                            const meta = lineFieldMeta(index, "tax");
+                            return (
+                              <>
+                          <input
+                            type="number"
+                            step="any"
+                            className={`detail-line-input${meta.isLow ? " low-confidence-input" : ""}`}
                             value={item.tax}
                             onChange={updateLineItemField(item.id, "tax")}
                             disabled={actionInProgress}
                           />
+                                {meta.confidenceLabel ? <span className={`field-confidence-tag${meta.isLow ? " low" : ""}`}>{meta.confidenceLabel}</span> : null}
+                              </>
+                            );
+                          })()}
                         </td>
                         <td>
+                          {(() => {
+                            const meta = lineFieldMeta(index, "total_amount");
+                            return (
+                              <>
                           <input
                             type="number"
                             step="any"
-                            className="detail-line-input"
+                            className={`detail-line-input${meta.isLow ? " low-confidence-input" : ""}`}
                             value={item.total}
                             onChange={updateLineItemField(item.id, "total")}
                             disabled={actionInProgress}
                           />
+                                {meta.confidenceLabel ? <span className={`field-confidence-tag${meta.isLow ? " low" : ""}`}>{meta.confidenceLabel}</span> : null}
+                              </>
+                            );
+                          })()}
                         </td>
                         <td className="line-item-row-actions">
                           <button
@@ -935,7 +1144,7 @@ function InvoiceReviewDetailPage() {
             <div className="card-title-row"><h3>Extraction Meta</h3></div>
             <div className="meta-grid">
               <div><span>Extraction Status</span><strong className="status-pending">{detail?.extractionStatus || "-"}</strong></div>
-              <div><span>Confidence Score</span><strong>{detail?.confidenceScore ? `${Math.round(Number(detail.confidenceScore) * 100)}%` : "-"}</strong></div>
+              <div><span>Confidence Score</span><strong>{normalizeConfidence(detail?.confidenceScore) === null ? "-" : `${Math.round((normalizeConfidence(detail?.confidenceScore) || 0) * 100)}%`}</strong></div>
               <div><span>Salvaged</span><strong>{detail?.salvaged ? "Yes" : "No"}</strong></div>
               <div><span>Retry Count</span><strong>{detail?.retryCount ?? 0}</strong></div>
             </div>

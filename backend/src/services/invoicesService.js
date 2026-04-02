@@ -5,6 +5,7 @@ import { invoiceExtractionRepository } from "../repositories/invoiceExtractionRe
 import { invoicePostingRepository } from "../repositories/invoicePostingRepository.js";
 import { invoiceRuntimeRepository } from "../repositories/invoiceRuntimeRepository.js";
 import { invoiceReadRepository } from "../repositories/invoiceReadRepository.js";
+import { extractionDispatchRepository } from "../repositories/extractionDispatchRepository.js";
 import { storageService } from "./storageService.js";
 import { superAdminTenantRepository } from "../repositories/superAdminTenantRepository.js";
 
@@ -680,13 +681,26 @@ const normalizeExtractionPayload = (payload) => {
   }
 
   const normalizedFields = payload.normalized_fields === undefined ? {} : toObject(payload.normalized_fields, "normalized_fields");
+  const extractedJson = toObject(payload.extracted_json || {}, "extracted_json");
+  const documentTypeCandidate = [
+    normalizedFields.document_type,
+    normalizedFields.documentType,
+    payload.document_type,
+    payload.documentType,
+    extractedJson.document_type,
+    extractedJson.documentType,
+    extractedJson.invoice_type,
+    extractedJson.invoiceType
+  ].find((value) => typeof value === "string" && value.trim() !== "");
+  const normalizedDocumentType = documentTypeCandidate ? resolveBulkDocumentType(documentTypeCandidate) : null;
 
   return {
     extractionStatus,
     retryCount: toRetryCount(payload.retry_count),
     rawModelOutput: toObject(payload.raw_model_output || {}, "raw_model_output"),
-    extractedJson: toObject(payload.extracted_json || {}, "extracted_json"),
+    extractedJson,
     normalizedFields: {
+      document_type: normalizedDocumentType,
       invoice_number: toOptionalString(normalizedFields.invoice_number),
       invoice_date: toOptionalFlexibleDate(normalizedFields.invoice_date, "normalized_fields.invoice_date"),
       due_date: toOptionalFlexibleDate(normalizedFields.due_date, "normalized_fields.due_date"),
@@ -835,6 +849,120 @@ const parseTallyTagNumber = (xmlText, tagName) => {
   return Number.isNaN(numeric) ? 0 : numeric;
 };
 
+const decodeXmlEntities = (value) =>
+  String(value || "")
+    .replace(/&apos;/gi, "'")
+    .replace(/&quot;/gi, "\"")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&amp;/gi, "&")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const extractTallyResponseTextReason = (value) => {
+  const text = String(value || "");
+  if (!text) return null;
+
+  const directResponseReason = text.match(/<RESPONSE>\s*([^<][\s\S]*?)\s*<\/RESPONSE>/i)?.[1];
+  if (directResponseReason) {
+    const normalized = decodeXmlEntities(directResponseReason);
+    if (normalized) return normalized;
+  }
+
+  if (/Unknown Request,\s*cannot be processed/i.test(text)) {
+    return "Unknown Request, cannot be processed";
+  }
+
+  return null;
+};
+
+const uniqueNonEmptyStrings = (values = []) => {
+  const seen = new Set();
+  const output = [];
+  for (const value of values) {
+    const text = decodeXmlEntities(value);
+    if (!text) continue;
+    const key = text.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    output.push(text);
+  }
+  return output;
+};
+
+const buildSilentTallyFailureReason = ({ created = 0, altered = 0, errors = 0, exceptions = 0 } = {}) => {
+  if (exceptions > 0) {
+    return `Tally returned EXCEPTIONS=${exceptions} with no LINEERROR details (CREATED=${created}, ALTERED=${altered}, ERRORS=${errors}).`;
+  }
+  if (errors > 0) {
+    return `Tally returned ERRORS=${errors} with no LINEERROR details (CREATED=${created}, ALTERED=${altered}, EXCEPTIONS=${exceptions}).`;
+  }
+  if (created <= 0 && altered <= 0) {
+    return "Tally did not create or alter any voucher.";
+  }
+  return "Tally response indicates posting failure";
+};
+
+const isGenericPostingFailureMessage = (value) => {
+  const text = toLooseOptionalString(value);
+  if (!text) return true;
+  return /^(posting failed|tally posting failed|tally response indicates posting failure)$/i.test(text);
+};
+
+const collectPostingFailureReasonsFromMetadata = (metadata = {}) => {
+  if (!metadata || typeof metadata !== "object") return [];
+  const reasons = [];
+
+  if (Array.isArray(metadata.reviewReasons)) {
+    reasons.push(...metadata.reviewReasons);
+  }
+  if (metadata.payload && typeof metadata.payload === "object" && Array.isArray(metadata.payload.reviewReasons)) {
+    reasons.push(...metadata.payload.reviewReasons);
+  }
+
+  const masterImportSummary =
+    (metadata.masterImportSummary && typeof metadata.masterImportSummary === "object" ? metadata.masterImportSummary : null) ||
+    (metadata.payload?.masterImportSummary && typeof metadata.payload.masterImportSummary === "object"
+      ? metadata.payload.masterImportSummary
+      : null);
+
+  if (Array.isArray(masterImportSummary?.ignoredLineErrors)) {
+    for (const lineError of masterImportSummary.ignoredLineErrors) {
+      reasons.push(`Master import warning: ${lineError}`);
+    }
+  }
+
+  reasons.push(
+    extractTallyResponseTextReason(metadata.responsePreview),
+    extractTallyResponseTextReason(metadata.payload?.responsePreview)
+  );
+
+  const summary =
+    (metadata.summary && typeof metadata.summary === "object" ? metadata.summary : null) ||
+    (metadata.payload?.summary && typeof metadata.payload.summary === "object" ? metadata.payload.summary : null);
+
+  if (summary) {
+    const created = Number(summary.created ?? 0) || 0;
+    const altered = Number(summary.altered ?? 0) || 0;
+    const errors = Number(summary.errors ?? 0) || 0;
+    const exceptions = Number(summary.exceptions ?? 0) || 0;
+    if (errors > 0 || exceptions > 0 || (created <= 0 && altered <= 0)) {
+      reasons.push(buildSilentTallyFailureReason({ created, altered, errors, exceptions }));
+    }
+  }
+
+  return uniqueNonEmptyStrings(reasons);
+};
+
+const resolvePostingFailureMessage = ({ errorMessage, responseMetadata } = {}) => {
+  const fallback = toLooseOptionalString(errorMessage) || "Posting failed";
+  if (!isGenericPostingFailureMessage(fallback)) {
+    return fallback;
+  }
+  const reasons = collectPostingFailureReasonsFromMetadata(responseMetadata);
+  return reasons[0] || fallback;
+};
+
 const escapeXmlText = (value) =>
   String(value || "")
     .replace(/&/g, "&amp;")
@@ -843,23 +971,48 @@ const escapeXmlText = (value) =>
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&apos;");
 
-const injectCurrentCompanyInImportXml = (xmlText, companyName) => {
-  const sourceXml = toOptionalString(xmlText);
-  const safeCompanyName = toOptionalString(companyName);
-  if (!sourceXml || !safeCompanyName) return sourceXml;
+const normalizeEscapedXmlWhitespace = (xmlText) =>
+  String(xmlText || "")
+    // Some generated XML arrives with literal \\n / \\r\\n between tags.
+    .replace(/>\\r\\n/g, ">\n")
+    .replace(/>\\n/g, ">\n")
+    .replace(/\\r\\n</g, "\n<")
+    .replace(/\\n</g, "\n<")
+    .replace(/\\t/g, "\t");
 
-  if (/<SVCURRENTCOMPANY>\s*[\s\S]*?<\/SVCURRENTCOMPANY>/i.test(sourceXml)) {
-    return sourceXml;
+const injectCurrentCompanyInImportXml = (xmlText, companyName) => {
+  const sourceXml = toOptionalString(normalizeEscapedXmlWhitespace(xmlText));
+  if (!sourceXml) return sourceXml;
+
+  const safeCompanyName = toOptionalString(companyName);
+  const tagsToInject = [];
+
+  if (safeCompanyName && !/<SVCURRENTCOMPANY>\s*[\s\S]*?<\/SVCURRENTCOMPANY>/i.test(sourceXml)) {
+    tagsToInject.push(`<SVCURRENTCOMPANY>${escapeXmlText(safeCompanyName)}</SVCURRENTCOMPANY>`);
+  }
+  if (!/<IMPORTDUPS>\s*[\s\S]*?<\/IMPORTDUPS>/i.test(sourceXml)) {
+    tagsToInject.push("<IMPORTDUPS>@@DUPIGNORE</IMPORTDUPS>");
+  }
+  if (!/<RETURNLINEERRORS>\s*[\s\S]*?<\/RETURNLINEERRORS>/i.test(sourceXml)) {
+    tagsToInject.push("<RETURNLINEERRORS>Yes</RETURNLINEERRORS>");
+  }
+  if (!/<LOGIMPORTERRORS>\s*[\s\S]*?<\/LOGIMPORTERRORS>/i.test(sourceXml)) {
+    tagsToInject.push("<LOGIMPORTERRORS>Yes</LOGIMPORTERRORS>");
   }
 
-  const companyTag = `<SVCURRENTCOMPANY>${escapeXmlText(safeCompanyName)}</SVCURRENTCOMPANY>`;
+  if (!tagsToInject.length) return sourceXml;
+
+  const staticVarsPayload = tagsToInject.join("");
 
   if (/<STATICVARIABLES>/i.test(sourceXml)) {
-    return sourceXml.replace(/<STATICVARIABLES>/i, `<STATICVARIABLES>${companyTag}`);
+    return sourceXml.replace(/<STATICVARIABLES>/i, `<STATICVARIABLES>${staticVarsPayload}`);
   }
 
   if (/<REQUESTDESC>/i.test(sourceXml)) {
-    return sourceXml.replace(/<\/REQUESTDESC>/i, `<STATICVARIABLES>${companyTag}</STATICVARIABLES></REQUESTDESC>`);
+    return sourceXml.replace(
+      /<\/REQUESTDESC>/i,
+      `<STATICVARIABLES>${staticVarsPayload}</STATICVARIABLES></REQUESTDESC>`
+    );
   }
 
   return sourceXml;
@@ -964,13 +1117,14 @@ const parseTallyPostingResponse = (xmlText, fallbackVoucherType = null, fallback
   const altered = parseTallyTagNumber(xmlText, "ALTERED");
   const errors = parseTallyTagNumber(xmlText, "ERRORS");
   const exceptions = parseTallyTagNumber(xmlText, "EXCEPTIONS");
-  const lineErrors = Array.from(String(xmlText || "").matchAll(/<LINEERROR>([\s\S]*?)<\/LINEERROR>/gi))
+  const explicitLineErrors = Array.from(String(xmlText || "").matchAll(/<LINEERROR>([\s\S]*?)<\/LINEERROR>/gi))
     .map((match) => String(match[1] || "").trim())
     .filter(Boolean);
   const exceptionReasons = Array.from(String(xmlText || "").matchAll(/<EXCEPTION>([\s\S]*?)<\/EXCEPTION>/gi))
     .map((match) => String(match[1] || "").trim())
     .filter(Boolean);
-  const allReasons = [...lineErrors, ...exceptionReasons].filter(Boolean);
+  const responseReason = extractTallyResponseTextReason(xmlText);
+  const allReasons = uniqueNonEmptyStrings([...explicitLineErrors, ...exceptionReasons, responseReason]);
   const voucherNumberMatch = String(xmlText || "").match(/<VOUCHERNUMBER>([^<]+)<\/VOUCHERNUMBER>/i);
   const voucherTypeMatch = String(xmlText || "").match(/<VOUCHERTYPENAME>([^<]+)<\/VOUCHERTYPENAME>/i);
 
@@ -984,7 +1138,7 @@ const parseTallyPostingResponse = (xmlText, fallbackVoucherType = null, fallback
     message:
       status === "SUCCESS"
         ? "Tally posting completed successfully"
-        : allReasons[0] || "Tally response indicates posting failure",
+        : allReasons[0] || buildSilentTallyFailureReason({ created, altered, errors, exceptions }),
     lineErrors: allReasons,
     tallyVoucherType: toOptionalString(voucherTypeMatch?.[1]) || fallbackVoucherType,
     tallyVoucherNumber: toOptionalString(voucherNumberMatch?.[1]) || fallbackVoucherNumber,
@@ -1132,6 +1286,78 @@ const isIgnorableTallyMasterLineError = (lineError) => {
   return false;
 };
 
+const analyzeVoucherXmlPreValidation = (voucherXml) => {
+  const xml = String(voucherXml || "");
+  if (!xml.trim()) return { errors: [] };
+
+  const voucherType =
+    toLooseOptionalString(xml.match(/<VOUCHERTYPENAME>\s*([\s\S]*?)\s*<\/VOUCHERTYPENAME>/i)?.[1]) ||
+    toLooseOptionalString(xml.match(/<VOUCHER\b[^>]*\bVCHTYPE\s*=\s*"([^"]+)"/i)?.[1]) ||
+    null;
+  const voucherTypeUpper = String(voucherType || "").toUpperCase();
+  const isSalesVoucher = voucherTypeUpper === "SALES";
+  const isPurchaseVoucher = voucherTypeUpper === "PURCHASE";
+
+  const partyLedgerName = decodeXmlEntities(
+    xml.match(/<PARTYLEDGERNAME>\s*([\s\S]*?)\s*<\/PARTYLEDGERNAME>/i)?.[1] || ""
+  );
+  const partyKey = partyLedgerName.toLowerCase();
+
+  const ledgerNames = Array.from(xml.matchAll(/<ALLLEDGERENTRIES\.LIST>[\s\S]*?<LEDGERNAME>\s*([\s\S]*?)\s*<\/LEDGERNAME>[\s\S]*?<\/ALLLEDGERENTRIES\.LIST>/gi))
+    .map((match) => decodeXmlEntities(match[1] || ""))
+    .filter(Boolean);
+  const inventoryAllocationLedgers = Array.from(xml.matchAll(/<ACCOUNTINGALLOCATIONS\.LIST>[\s\S]*?<LEDGERNAME>\s*([\s\S]*?)\s*<\/LEDGERNAME>[\s\S]*?<\/ACCOUNTINGALLOCATIONS\.LIST>/gi))
+    .map((match) => decodeXmlEntities(match[1] || ""))
+    .filter(Boolean);
+  const hasInventoryEntries = /<ALLINVENTORYENTRIES\.LIST>/i.test(xml);
+
+  const taxLikeLedgerPattern = /\b(cgst|sgst|igst|cess|gst|tds|round\s*off)\b/i;
+  const partyLikeLedgerPattern = /\b(pvt|private|ltd|limited|llp|prop|proprietor|traders?|enterprise|garments?|co\.?|company)\b/i;
+
+  const businessLedgers = uniqueNonEmptyStrings(
+    [...ledgerNames, ...inventoryAllocationLedgers].filter((name) => {
+      const key = String(name || "").trim().toLowerCase();
+      if (!key) return false;
+      if (partyKey && key === partyKey) return false;
+      if (taxLikeLedgerPattern.test(name)) return false;
+      return true;
+    })
+  );
+
+  const errors = [];
+
+  if ((isSalesVoucher || isPurchaseVoucher) && !hasInventoryEntries && businessLedgers.length === 0) {
+    errors.push(
+      `${voucherType || "Voucher"} is missing a non-party ${isSalesVoucher ? "Sales" : "Purchase"} ledger entry in ALLLEDGERENTRIES.`
+    );
+  }
+
+  if (isSalesVoucher) {
+    const inputTaxLedgers = uniqueNonEmptyStrings(ledgerNames.filter((name) => /\binput\b/i.test(name) && /(cgst|sgst|igst)/i.test(name)));
+    if (inputTaxLedgers.length) {
+      errors.push(`Sales voucher is using Input tax ledgers: ${inputTaxLedgers.join(", ")}. Use Output tax ledgers.`);
+    }
+  }
+
+  if (isPurchaseVoucher) {
+    const outputTaxLedgers = uniqueNonEmptyStrings(ledgerNames.filter((name) => /\boutput\b/i.test(name) && /(cgst|sgst|igst)/i.test(name)));
+    if (outputTaxLedgers.length) {
+      errors.push(`Purchase voucher is using Output tax ledgers: ${outputTaxLedgers.join(", ")}. Use Input tax ledgers.`);
+    }
+  }
+
+  if ((isSalesVoucher || isPurchaseVoucher) && !hasInventoryEntries && businessLedgers.length > 0) {
+    const partyLikeBusinessLedgers = businessLedgers.filter((name) => partyLikeLedgerPattern.test(name));
+    if (partyLikeBusinessLedgers.length === businessLedgers.length) {
+      errors.push(
+        `${voucherType || "Voucher"} business ledger looks like party master (${businessLedgers.join(", ")}). Map it to ${isSalesVoucher ? "Sales" : "Purchase"} ledger.`
+      );
+    }
+  }
+
+  return { errors };
+};
+
 const resolveInvoiceListFilters = (query = {}) => {
   const documentTypeInput = normalizeQueryText(query.documentType || query.invoiceType);
   const documentType =
@@ -1193,7 +1419,6 @@ export const invoicesService = {
 
     const storage = await storageService.resolveStoragePaths({ tenantId, branchId });
     const incomingPath = toOptionalString(storage?.paths?.incoming);
-    const runtimePaths = storage?.paths && typeof storage.paths === "object" ? storage.paths : {};
 
     if (!incomingPath) {
       throw createError("Incoming storage path is not configured", 422, "STORAGE_CONFIG_INVALID");
@@ -1272,7 +1497,7 @@ export const invoicesService = {
       }
     }
 
-    // Fire n8n extraction webhooks (fire-and-forget) for every successfully registered invoice
+    // Queue extraction jobs for worker dispatch (DB-backed queue).
     if (items.length > 0) {
       n8nDispatch.attempted = true;
       const n8nConfig = await superAdminTenantRepository
@@ -1280,13 +1505,7 @@ export const invoicesService = {
         .catch(() => null);
 
       if (n8nConfig?.isActive && n8nConfig?.n8nBaseUrl && n8nConfig?.extractionWebhookPlaceholder) {
-        const baseUrl = n8nConfig.n8nBaseUrl.replace(/\/+$/, "");
-        const hookPath = n8nConfig.extractionWebhookPlaceholder.startsWith("/")
-          ? n8nConfig.extractionWebhookPlaceholder
-          : `/${n8nConfig.extractionWebhookPlaceholder}`;
-        const webhookUrl = `${baseUrl}${hookPath}`;
         const workflowKey = String(n8nConfig.workflowKeyToken || "").trim();
-        const backendApiBaseUrl = toOptionalString(n8nConfig.backendApiBaseUrl);
         if (!workflowKey) {
           n8nDispatch.skippedReason = "N8N_WORKFLOW_KEY_MISSING";
           console.warn(`[n8n] Skipping extraction webhook for tenant ${tenantId}: workflowKeyToken missing`);
@@ -1299,67 +1518,18 @@ export const invoicesService = {
         }
 
         for (const item of items) {
-          const headers = { "Content-Type": "application/json" };
-          headers["x-workflow-key"] = workflowKey;
-
-          fetch(webhookUrl, {
-            method: "POST",
-            headers,
-            body: JSON.stringify({
-              batchId,
-              invoiceId: item.invoiceId,
+          try {
+            await extractionDispatchRepository.enqueueInvoiceJob({
               tenantId,
               branchId,
-              documentType: item.documentType,
-              fileName: item.fileName,
-              filePath: item._filePath,
-              originalPath: item._filePath,
-              originalFilePath: item._filePath,
-              mimeType: item.mimeType || null,
-              backendApiBaseUrl: backendApiBaseUrl || null,
-              n8nRootFolder: n8nConfig.n8nRootFolder || null,
-              runtimeContext: {
-                invoiceId: item.invoiceId,
-                tenantId,
-                branchId,
-                requestId: context.requestId || null,
-                authToken: null,
-                apiBaseUrl: backendApiBaseUrl || null,
-                storageMode: storage?.storageMode || null,
-                paths: {
-                  incoming: runtimePaths.incoming || null,
-                  review: runtimePaths.review || null,
-                  processed: runtimePaths.processed || null,
-                  success: runtimePaths.success || null,
-                  exception: runtimePaths.exception || null,
-                  output: runtimePaths.output || null
-                }
-              },
-              runtimeConfig: {
-                tenantId,
-                branchId,
-                apiBaseUrl: backendApiBaseUrl || null,
-                paths: {
-                  incoming: runtimePaths.incoming || null,
-                  review: runtimePaths.review || null,
-                  processed: runtimePaths.processed || null,
-                  success: runtimePaths.success || null,
-                  exception: runtimePaths.exception || null,
-                  output: runtimePaths.output || null
-                }
-              },
-              incomingFolder: runtimePaths.incoming || null,
-              reviewFolder: runtimePaths.review || null,
-              processedFolder: runtimePaths.processed || null,
-              successFolder: runtimePaths.success || null,
-              exceptionFolder: runtimePaths.exception || null,
-              outputFolder: runtimePaths.output || null
-            })
-          }).catch((err) => {
-            console.error(`[n8n] Extraction webhook failed for invoice ${item.invoiceId}: ${err.message}`);
-          });
-
-          n8nDispatch.dispatched += 1;
+              invoiceId: item.invoiceId
+            });
+            n8nDispatch.dispatched += 1;
+          } catch (error) {
+            console.error(
+              `[n8n] Failed to enqueue extraction dispatch for invoice ${item.invoiceId}: ${error?.message || "unknown error"}`
+            );
+          }
         }
       } else if (!n8nConfig?.isActive) {
         n8nDispatch.skippedReason = "N8N_INACTIVE";
@@ -1875,6 +2045,19 @@ export const invoicesService = {
       const currentCompanyName = configuredCompanyName || toOptionalString(tallyConfig.companyName);
       const preparedMasterRequestXml = injectCurrentCompanyInImportXml(masterRequestXml, currentCompanyName);
       const preparedVoucherRequestXml = injectCurrentCompanyInImportXml(voucherRequestXml, currentCompanyName);
+      const voucherPreValidation = analyzeVoucherXmlPreValidation(preparedVoucherRequestXml);
+      if (voucherPreValidation.errors.length > 0) {
+        return failureResult("VOUCHER_XML_PREVALIDATION_FAILED", voucherPreValidation.errors[0], {
+          summary: {
+            created: 0,
+            altered: 0,
+            errors: 1,
+            exceptions: 0
+          },
+          reviewReasons: voucherPreValidation.errors,
+          responsePreview: String(preparedVoucherRequestXml || "").slice(0, 2000)
+        });
+      }
 
       let tallyEndpointUrl = null;
       try {
@@ -2009,12 +2192,21 @@ export const invoicesService = {
         }
 
         if (parsed.status !== "SUCCESS") {
-          return failureResult("TALLY_POSTING_FAILED", parsed.message, {
+          const masterIgnoredLineErrors = Array.isArray(masterImportSummary?.ignoredLineErrors)
+            ? uniqueNonEmptyStrings(masterImportSummary.ignoredLineErrors).map((reason) => `Master import warning: ${reason}`)
+            : [];
+          const reviewReasons = uniqueNonEmptyStrings([...(parsed.lineErrors || []), ...masterIgnoredLineErrors]);
+          const failureMessage =
+            parsed.message ||
+            reviewReasons[0] ||
+            buildSilentTallyFailureReason(parsed.summary);
+
+          return failureResult("TALLY_POSTING_FAILED", failureMessage, {
             summary: parsed.summary,
             masterImportSummary,
             tallyVoucherType: parsed.tallyVoucherType,
             tallyVoucherNumber: parsed.tallyVoucherNumber,
-            reviewReasons: parsed.lineErrors,
+            reviewReasons,
             responsePreview: parsed.responsePreview
           });
         }
@@ -2243,14 +2435,24 @@ export const invoicesService = {
       throw createError("Invoice not found for tenant", 404, "INVOICE_NOT_FOUND");
     }
 
-    const [storage, n8nConfig, tallyConfig, duplicateCandidates] = await Promise.all([
+    const [storage, n8nConfig, tallyConfig, duplicateCandidates, branches] = await Promise.all([
       storageService.resolveStoragePaths({ tenantId: invoice.tenantId, branchId: invoice.branchId }),
       superAdminTenantRepository.findN8nConfigByTenantId(invoice.tenantId),
       superAdminTenantRepository.findTallyConfigByTenantId(invoice.tenantId),
       invoiceRuntimeRepository.findDuplicateCandidates(
         invoice.tenantId, invoice.documentType, invoice.dedupeKey, normalizedId
-      )
+      ),
+      superAdminTenantRepository.listBranchesByTenant(invoice.tenantId).catch(() => [])
     ]);
+
+    const branch =
+      (Array.isArray(branches)
+        ? branches.find((row) => row.id === invoice.branchId) ||
+          branches.find((row) => row.isDefault) ||
+          null
+        : null);
+    const ourGstin = toOptionalString(branch?.branchGstin || branch?.branch_gstin);
+    const normalizedOurGstin = ourGstin ? ourGstin.toUpperCase() : null;
 
     return {
       invoiceId: invoice.id,
@@ -2272,6 +2474,16 @@ export const invoicesService = {
         partyGstin: invoice.partyGstin,
         totalAmount: invoice.totalAmount
       },
+      branch: branch
+        ? {
+            id: branch.id,
+            branchCode: branch.branchCode || null,
+            branchName: branch.branchName || null,
+            branchGstin: branch.branchGstin || null
+          }
+        : null,
+      ourGstin: normalizedOurGstin,
+      our_gstin: normalizedOurGstin,
       storage,
       n8n: n8nConfig,
       tally: tallyConfig,
@@ -2284,10 +2496,13 @@ export const invoicesService = {
 
   async markPostingFailed(invoiceId, context, payload = {}) {
     const normalizedId = requireInvoiceId(invoiceId);
-    const errorMessage = toOptionalString(payload.error_message) || "Posting failed";
     const responseMetadata = payload.tally_response_metadata
       ? toObject(payload.tally_response_metadata, "tally_response_metadata")
       : null;
+    const errorMessage = resolvePostingFailureMessage({
+      errorMessage: toOptionalString(payload.error_message) || "Posting failed",
+      responseMetadata
+    });
 
     const client = await invoicePostingRepository.getClient();
 

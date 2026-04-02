@@ -521,6 +521,7 @@ export const invoiceReadRepository = {
           COALESCE(i.tally_response_metadata->>'postedBy', 'System') AS "postedBy",
           COALESCE(i.tally_voucher_type, '-') AS "voucherType",
           COALESCE(i.tally_voucher_number, '-') AS "voucherNumber",
+          i.tally_response_metadata AS "tallyResponseMetadata",
            i.posting_error_message AS "lastFailureReason",
            COALESCE(i.posting_error_message, i.tally_response_metadata->>'summary', '-') AS "responseSummary"
        FROM invoices i

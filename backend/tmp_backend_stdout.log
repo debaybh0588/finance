@@ -1,0 +1,5 @@
+
+> accounting-ai-backend@0.1.0 start
+> node src/server.js
+
+Backend listening on port 4000

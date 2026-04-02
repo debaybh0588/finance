@@ -21,6 +21,25 @@ export const postingController = {
     res.json({ success: true, data });
   },
 
+  async reviewMapping(req, res) {
+    const data = await postingService.getPostingReviewMapping(req.params.invoiceId, req.context, {
+      forceRefresh: false
+    });
+    res.json({ success: true, data });
+  },
+
+  async reviewMappingRefresh(req, res) {
+    const data = await postingService.getPostingReviewMapping(req.params.invoiceId, req.context, {
+      forceRefresh: true
+    });
+    res.json({ success: true, data });
+  },
+
+  async reviewMappingSave(req, res) {
+    const data = await postingService.savePostingReviewMapping(req.params.invoiceId, req.context, req.body);
+    res.status(200).json({ success: true, data });
+  },
+
   async reviewApprove(req, res) {
     const data = await postingService.approvePostingReview(req.params.invoiceId, req.context, req.body);
     res.status(200).json({ success: true, data });
