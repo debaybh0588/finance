@@ -2088,12 +2088,20 @@ export const invoicesService = {
           }
 
           const masterParsed = parseTallyPostingResponse(masterResponseText);
+          const masterIgnored = parseTallyTagNumber(masterResponseText, "IGNORED");
+          const masterLooksIdempotentIgnoreOnly =
+            masterParsed.summary.errors <= 0 &&
+            masterParsed.summary.exceptions <= 0 &&
+            masterParsed.summary.created <= 0 &&
+            masterParsed.summary.altered <= 0 &&
+            masterIgnored > 0;
+
           if (masterParsed.status !== "SUCCESS") {
             const ignorableMasterErrors =
               masterParsed.lineErrors.length > 0 &&
               masterParsed.lineErrors.every((lineError) => isIgnorableTallyMasterLineError(lineError));
 
-            if (!ignorableMasterErrors) {
+            if (!ignorableMasterErrors && !masterLooksIdempotentIgnoreOnly) {
               return failureResult("TALLY_MASTER_IMPORT_FAILED", masterParsed.message, {
                 summary: masterParsed.summary,
                 reviewReasons: masterParsed.lineErrors,
@@ -2103,11 +2111,15 @@ export const invoicesService = {
 
             masterImportSummary = {
               ...masterParsed.summary,
+              ignoredCount: masterIgnored,
               ignored: true,
               ignoredLineErrors: masterParsed.lineErrors
             };
           } else {
-            masterImportSummary = masterParsed.summary;
+            masterImportSummary = {
+              ...masterParsed.summary,
+              ignoredCount: masterIgnored
+            };
           }
         }
 
